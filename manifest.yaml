@@ -1,0 +1,36 @@
+# The Jira plugin's manifest, read by the host before any of its code runs.
+name: jira
+title: Jira
+description: Pull a Jira Cloud board's issues into the Backlog as tasks, and their comments as threads signed by the people who wrote them.
+version: 0.1.0
+min_host: 0.15.0
+requires:
+  - backlog
+  - comments
+settings:
+  - name: connections
+    type: structured
+    scope: root
+    default: []
+    meaning: "the boards this root connects to: each a name, site, project, optional board and jql, a direction, and its mapping"
+  - name: pull_attachments
+    type: checkbox
+    scope: root
+    default: false
+    meaning: download each pulled issue's attachments into assets/ instead of linking to them in Jira
+  - name: add_people
+    type: checkbox
+    scope: root
+    default: false
+    meaning: add each person a pull finds whom the root does not have (an assignee, a comment's author, a person mentioned) to the root's users; off, they keep the name Jira gives them
+  - name: accounts
+    type: structured
+    scope: me
+    default: {}
+    meaning: the Atlassian email each site signs in with, for this root (the token is in the credentials file in app data)
+  - name: auto_fetch
+    type: select
+    scope: me
+    default: "off"
+    options: ["off", "5", "15", "30", "60"]
+    meaning: fetch every pull connection this many minutes apart while the app has the root open; nothing pulls on its own

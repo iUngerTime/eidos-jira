@@ -1,0 +1,23 @@
+{
+  "name": "@iungertime/jira",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Jira Cloud for Eidos MD: pull a board's issues into the Backlog as tasks, their comments as threads, and their people as root users.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "node scripts/build.mjs && node --test --experimental-strip-types \"test/*.test.ts\"",
+    "install-local": "node scripts/install-local.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "eidosmd": "^0.15.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}

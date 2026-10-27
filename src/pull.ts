@@ -329,7 +329,9 @@ function peopleFor(context: Context, write: boolean): People {
     if (found?.user) return { name, user: found.user };
     if (!context.addPeople || !user.accountId) return { name, user: null };
     added.add(name);
-    if (!write) return { name, user: null };
+    // a fetch adds nobody, but a task or a comment that names someone a pull would add changes with them: their stand-in
+    // alias differs from the name written now, so it is counted, and is never written
+    if (!write) return { name, user: `\u0000${name}` };
     const person = context.host.addPerson({ name, email: user.emailAddress ?? null });
     return { name, user: person.user.alias ?? person.user.name };
   };
@@ -362,6 +364,11 @@ export async function run(context: Context, write: boolean, options: PullOptions
     return out;
   };
   const held = byIssue();
+  // REQ11: a task marked gone whose issue is in the scope again is read with what changed, though Jira may not have
+  // changed it, so it comes back; read by id, a hundred at a time
+  const pulledIds = new Set(issues.map((issue) => issue.id));
+  const returning = [...held].filter(([id, task]) => inScope.has(id) && !pulledIds.has(id) && heldOf(task)!.gone !== undefined).map(([id]) => id);
+  for (let at = 0; at < returning.length; at += 100) issues.push(...(await search(client, `id in (${returning.slice(at, at + 100).join(', ')})`, wanted, 100)));
 
   const plan: Plan = {
     connection: connection.name,
@@ -489,7 +496,8 @@ export async function run(context: Context, write: boolean, options: PullOptions
     const localHere = local.filter((eidos) => changes.includes(eidos));
     if (task && localHere.length > 0) plan.local.push({ key: issue.key, task: task.id ?? task.name, fields: localHere });
     if (comments && context.comments) {
-      const counted = countComments(context.comments, task, comments, issue);
+      const textOf = (comment: JiraComment): string => adfToMarkdown(comment.body, { mention, media: media.link }) || '(empty)';
+      const counted = countComments(context.comments, task, comments, issue, textOf);
       plan.comments.add += counted.add;
       plan.comments.change += counted.change;
       plan.comments.remove += counted.remove;
@@ -589,7 +597,8 @@ export async function run(context: Context, write: boolean, options: PullOptions
       if (fields.sections && Object.keys(fields.sections).length === 0) delete fields.sections;
       if (fields.properties && Object.keys(fields.properties).length === 0) delete fields.properties;
       written = backlog.set(task.id ?? task.name, { ...fields, ...dates, tool: { jira } });
-      if (intent.changes.length > 0 || was?.key !== issue.key || was?.gone !== undefined) done.changed += 1;
+      // counted when anything of the task was written, a reference pointed at a file just downloaded included
+      if (Object.keys(fields).length > 0 || was?.key !== issue.key || was?.gone !== undefined) done.changed += 1;
     }
     // the digest of what the task holds now, after the Backlog wrote it (a section's text as its region reads), so the next fetch compares like with like
     const settled = Object.fromEntries(
@@ -755,7 +764,9 @@ function threadOf(comments: CommentsApi, task: TaskView | null, issue: Issue): T
   return comments.threads({ host: 'backlog', id: task.id }).find((thread) => thread.id === threadIdOf(issue)) ?? null;
 }
 
-function countComments(comments: CommentsApi, task: TaskView | null, pulled: JiraComment[], issue: Issue): { add: number; change: number; remove: number } {
+// What a pull would do to an issue's thread, each comment's text written as the pull writes it (its mentions and its files
+// as the pull carries them), so a comment the pull would leave as it is is never counted as one to change
+function countComments(comments: CommentsApi, task: TaskView | null, pulled: JiraComment[], issue: Issue, textOf: (comment: JiraComment) => string): { add: number; change: number; remove: number } {
   const thread = threadOf(comments, task, issue);
   const held = new Map((thread?.messages ?? []).filter((message) => message.external?.startsWith('jira:')).map((message) => [message.external!, message]));
   const kept = new Set(pulled.map(externalOf));
@@ -764,7 +775,7 @@ function countComments(comments: CommentsApi, task: TaskView | null, pulled: Jir
   for (const comment of pulled) {
     const message = held.get(externalOf(comment));
     if (!message) add += 1;
-    else if (message.text.trim() !== adfToMarkdown(comment.body).trim() && moment(comment.updated) !== moment(comment.created)) change += 1;
+    else if (message.text.trim() !== textOf(comment).trim()) change += 1;
   }
   return { add, change, remove: [...held.keys()].filter((external) => !kept.has(external)).length };
 }

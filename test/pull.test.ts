@@ -242,28 +242,43 @@ test('Jira Pull REQ11: an issue gone from the scope leaves its task, marked gone
   assert.match(await ok(['jira', 'fetch']), /- ACME-3 {2}T-ACME-3 is gone from the scope/);
   assert.match(await ok(['jira', 'pull']), /1 marked gone/);
   assert.match(readFileSync(taskFile('t-acme-3-'), 'utf8'), /gone: "?\d{4}-\d{2}-\d{2}"?/);
+  // back in the scope with nothing changed in Jira, it is read again and comes back
+  fake.state.hidden.delete('10102');
+  assert.match(await ok(['jira', 'fetch']), /↺ ACME-3 {2}T-ACME-3 is back in the scope/);
+  await ok(['jira', 'pull']);
+  assert.doesNotMatch(readFileSync(taskFile('t-acme-3-'), 'utf8'), /gone:/);
 });
 
 test('Jira Pull REQ14: with pull_attachments on, an attachment is downloaded into assets once and the reference points at it', async () => {
   await ok(['plugin', 'set', 'jira', 'pull_attachments', 'true']);
   touch(fake.state, 'ACME-2', {}, jiraNow());
-  assert.match(await ok(['jira', 'pull']), /1 attachments downloaded/);
+  const fetched = await ok(['jira', 'fetch']);
+  assert.match(fetched, /1 attachment to download/);
+  assert.doesNotMatch(fetched, /nothing to pull/, 'a download is something to pull');
+  const pulled = await ok(['jira', 'pull']);
+  assert.match(pulled, /1 attachments downloaded/);
+  assert.match(pulled, /1 changed/, 'a reference pointed at the file counts as a change');
   const story = readFileSync(taskFile('t-acme-2-ship'), 'utf8');
   assert.match(story, /\[mockup\.png\]\(\.\.\/assets\/jira-20001-mockup\.png\)/);
   touch(fake.state, 'ACME-2', {}, jiraNow());
   assert.doesNotMatch(await ok(['jira', 'pull']), /attachments downloaded/, 'not downloaded again');
+  // a comment or a description with a mention and a file reads as the pull writes it, so nothing is counted to change
+  assert.match(await ok(['jira', 'fetch', '--full']), /nothing to pull/);
 });
 
 test('Jira REQ15, Jira Pull REQ10: with add_people on, a person the root does not have is listed by a fetch and added by a pull', async () => {
   await ok(['plugin', 'set', 'jira', 'add_people', 'true']);
   touch(fake.state, 'ACME-2', {}, jiraNow());
   const fetched = await ok(['jira', 'fetch', '--full']);
-  assert.match(fetched, /1 person to add/);
+  assert.match(fetched, /2 people to add/);
+  assert.match(fetched, /2 tasks to change/, 'a task that names them changes with them');
+  assert.match(fetched, /~ ACME-2 {2}T-ACME-2: section:description/, 'its description mentions Lin');
+  assert.match(fetched, /~ ACME-3 {2}T-ACME-3: assignee/, 'its assignee is Grace');
   assert.match(fetched, /@ Lin Example/);
-  assert.doesNotMatch(fetched, /@ Grace Example/, 'a comment pulled before is not signed again');
+  assert.match(fetched, /@ Grace Example/);
   assert.doesNotMatch(fetched, /@ Ada Example/, 'one the root has is not added');
-  assert.doesNotMatch(await ok(['users', 'list']), /Lin Example/, 'a fetch adds nobody');
-  assert.match(await ok(['jira', 'pull', '--full']), /1 people added/);
+  assert.doesNotMatch(await ok(['users', 'list']), /Lin Example|Grace Example/, 'a fetch adds nobody');
+  assert.match(await ok(['jira', 'pull', '--full']), /2 people added/);
   assert.match(await ok(['users', 'list']), /Lin Example\s+@lin\b/);
   assert.match(readFileSync(taskFile('t-acme-2-ship'), 'utf8'), /Ask @lin about \*\*SSO\*\*\./, 'a mention reads as the user added');
   assert.doesNotMatch(await ok(['jira', 'fetch', '--full']), /people to add/, 'each is added once');

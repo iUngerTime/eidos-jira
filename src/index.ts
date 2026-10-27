@@ -104,7 +104,7 @@ function describePlan(plan: Plan): string {
     ...(plan.people.length > 0 ? [`${count(plan.people.length, 'person', 'people')} to add`] : []),
     ...(plan.gone.length > 0 ? [`${plan.gone.length} gone`] : []),
   ];
-  const nothing = plan.add.length + plan.change.length + comments + plan.gone.length + plan.people.length === 0;
+  const nothing = plan.add.length + plan.change.length + comments + plan.gone.length + plan.people.length + plan.attachments === 0;
   lines.push(`${plan.connection}: ${nothing ? 'nothing to pull' : head.join(', ')}${plan.since ? ` (changed since ${plan.since})` : ' (the whole scope)'}`);
   for (const add of plan.add) lines.push(`  + ${add.key}  ${add.title} (${add.type})`);
   for (const change of plan.change) lines.push(`  ~ ${change.key}  ${change.task}${change.fields.length > 0 ? `: ${change.fields.join(', ')}` : ''}`);

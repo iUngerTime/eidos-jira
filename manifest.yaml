@@ -3,7 +3,7 @@ name: jira
 title: Jira
 description: Pull a Jira Cloud board's issues into the Backlog as tasks, and their comments as threads signed by the people who wrote them.
 version: 0.1.0
-min_host: 0.17.0
+min_host: 0.16.1
 requires:
   - backlog
   - comments

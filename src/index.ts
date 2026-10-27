@@ -64,16 +64,6 @@ function backlogOf(host: Host): BacklogApi {
   return backlog;
 }
 
-// `add_people` (Jira REQ15), refused on a host that cannot add a person, before anything is read
-function addPeople(host: Host): boolean {
-  if (host.settings().get<boolean>('add_people') !== true) return false;
-  if (!host.addPerson)
-    throw new Error(
-      `add_people is on, and this Eidos CLI (${host.version}) cannot add a person for a plugin; update to eidosmd 0.17.0 or later, or turn it off (eidos plugin set jira add_people false)`,
-    );
-  return true;
-}
-
 async function contextFor(host: Host, connection: Connection, given?: Credentials) {
   const client = jiraClient(connection.site, given ?? credentials(host, connection.site), connection.name);
   const me = await client.get<{ timeZone?: string }>('/rest/api/3/myself');
@@ -86,7 +76,7 @@ async function contextFor(host: Host, connection: Connection, given?: Credential
     connection,
     timeZone: me.timeZone ?? 'UTC',
     pullAttachments: host.settings().get<boolean>('pull_attachments') === true,
-    addPeople: addPeople(host),
+    addPeople: host.settings().get<boolean>('add_people') === true,
   };
 }
 

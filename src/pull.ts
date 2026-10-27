@@ -330,7 +330,7 @@ function peopleFor(context: Context, write: boolean): People {
     if (!context.addPeople || !user.accountId) return { name, user: null };
     added.add(name);
     if (!write) return { name, user: null };
-    const person = context.host.addPerson!({ name, email: user.emailAddress ?? null });
+    const person = context.host.addPerson({ name, email: user.emailAddress ?? null });
     return { name, user: person.user.alias ?? person.user.name };
   };
   return { of, added };

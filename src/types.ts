@@ -2,14 +2,6 @@
 // A plugin from outside imports nothing of the CLI but `eidosmd/plugin`, so
 // the Backlog's, Comments', and Assets' APIs, which it reaches through
 // `host.plugin(name)`, are described here as far as it uses them.
-// The host member this plugin uses that eidosmd 0.15.0 lacks (Surfaces REQ35,
-// @since 0.17.0), needed only with `add_people` on.
-declare module 'eidosmd/plugin' {
-  interface Host {
-    addPerson?(person: { name: string; email?: string | null }): { user: { name: string; alias: string | null }; created: boolean };
-  }
-}
-
 export type StatusCategory = 'todo' | 'in_progress' | 'done';
 
 export interface SectionDeclaration {

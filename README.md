@@ -22,7 +22,7 @@ eidos plugin enable jira
 eidos plugin allow jira
 ```
 
-`allow` means this machine trusts the plugin's code. Until you allow it, a root that switches the plugin on loads none of it. The plugin needs eidosmd 0.17.0 or later, the Backlog (`eidos plugin enable backlog`), and Comments for threads.
+`allow` means this machine trusts the plugin's code. Until you allow it, a root that switches the plugin on loads none of it. The plugin needs eidosmd 0.16.1 or later, the Backlog (`eidos plugin enable backlog`), and Comments for threads.
 
 ## Use
 
@@ -85,11 +85,13 @@ pnpm build
 
 The build writes `dist/manifest.yaml`, `dist/cli.js`, and `dist/instructions.md`, the release files. `cli.js` is a CommonJS bundle whose only import from the CLI is `require('eidosmd/plugin')`, which the host answers.
 
-The tests run the real Eidos CLI against a fake Jira server (`test/fake-jira.ts`) in a scratch root, with the credentials file in a scratch app data folder. No live Jira and no real token are used. Point `EIDOS_CLI` at a CLI's `dist/src/cli.js` that has the host features above:
+The tests run the real Eidos CLI against a fake Jira server (`test/fake-jira.ts`) in a scratch root, with the credentials file in a scratch app data folder. No live Jira and no real token are used. They run the `eidosmd` the repo installs from npm:
 
 ```bash
-EIDOS_CLI=../eidosmd/cli/dist/src/cli.js pnpm test
+pnpm test
 ```
+
+To test against a CLI built from source instead, point `EIDOS_CLI` at its `dist/src/cli.js` (`EIDOS_CLI=../eidosmd/cli/dist/src/cli.js pnpm test`).
 
 To try it by hand, start the fake server (`node --experimental-strip-types test/fake-jira.ts`), install the build into an app data folder of your own with `EIDOS_APP_DATA=/tmp/eidos-try/app pnpm install-local`, and use that same `EIDOS_APP_DATA` in a scratch root.
 

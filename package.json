@@ -2,8 +2,12 @@
   "name": "@iungertime/jira",
   "version": "0.1.0",
   "private": true,
-  "description": "Jira Cloud for Eidos MD: pull a board's issues into the Backlog as tasks, their comments as threads, and their people as root users.",
-  "license": "UNLICENSED",
+  "description": "Jira Cloud for Eidos MD: pull a board's issues into the Backlog as tasks, and their comments as threads signed by the people who wrote them.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iUngerTime/eidos-jira.git"
+  },
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",

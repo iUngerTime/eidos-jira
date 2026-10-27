@@ -3,7 +3,7 @@ name: jira
 title: Jira
 description: Pull a Jira Cloud board's issues into the Backlog as tasks, and their comments as threads signed by the people who wrote them.
 version: 0.1.0
-min_host: 0.15.0
+min_host: 0.17.0
 requires:
   - backlog
   - comments
@@ -12,7 +12,7 @@ settings:
     type: structured
     scope: root
     default: []
-    meaning: "the boards this root connects to: each a name, site, project, optional board and jql, a direction, and its mapping"
+    meaning: 'the boards this root connects to: each a name, site, project, optional board and jql, a direction, and its mapping'
   - name: pull_attachments
     type: checkbox
     scope: root
@@ -31,6 +31,6 @@ settings:
   - name: auto_fetch
     type: select
     scope: me
-    default: "off"
-    options: ["off", "5", "15", "30", "60"]
+    default: 'off'
+    options: ['off', '5', '15', '30', '60']
     meaning: fetch every pull connection this many minutes apart while the app has the root open; nothing pulls on its own

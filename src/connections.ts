@@ -197,4 +197,3 @@ export async function removeSignIn(host: Host, site: string): Promise<string[]> 
   }
   return out;
 }
-

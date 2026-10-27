@@ -22,7 +22,7 @@ eidos plugin enable jira
 eidos plugin allow jira
 ```
 
-`allow` means this machine trusts the plugin's code. Until you allow it, a root that switches the plugin on loads none of it. The plugin needs the Backlog (`eidos plugin enable backlog`), and Comments for threads.
+`allow` means this machine trusts the plugin's code. Until you allow it, a root that switches the plugin on loads none of it. The plugin needs eidosmd 0.17.0 or later, the Backlog (`eidos plugin enable backlog`), and Comments for threads.
 
 ## Use
 
@@ -68,7 +68,7 @@ eidos jira pull
 
 - Each issue becomes a task. Its id comes from the issue key (`ACME-123` becomes `T-ACME-123`), so two people pulling the same board on two branches write the same file. A Jira sub-task becomes a subtask of its parent's task, with the id the Backlog gives a subtask. The issue itself is kept in the task's frontmatter under `jira`; never edit that key.
 - An issue's comments become one thread on its task, each signed by its author and dated when Jira says it was written. Edits and deletions in Jira follow. Comments restricted to a role or a group are left out unless the connection sets `restricted_comments: true`.
-- People keep the names Jira gives them: an assignee, a comment's author, and a mention are written as the root user of the same name where the root has one, and as the Jira name otherwise. A pull adds nobody to the root's users unless you turn on `add_people` (`eidos plugin set jira add_people true`, shared by everyone in the root); then each person the root does not have is added as an ordinary user, named as Jira names them, which needs eidosmd 0.17.0 or later.
+- People keep the names Jira gives them: an assignee, a comment's author, and a mention are written as the root user of the same name where the root has one, and as the Jira name otherwise. A pull adds nobody to the root's users unless you turn on `add_people` (`eidos plugin set jira add_people true`, shared by everyone in the root); then each person the root does not have is added as an ordinary user, named as Jira names them.
 - A sprint becomes a milestone of the same name, dated when it ends.
 - Attachments are linked to in Jira by default. Turn on `pull_attachments` (`eidos plugin set jira pull_attachments true`) to download them into `assets/` instead.
 - An issue that leaves the scope keeps its task, marked `jira.gone`. Nothing is ever deleted.
@@ -92,3 +92,7 @@ EIDOS_CLI=../eidosmd/cli/dist/src/cli.js pnpm test
 ```
 
 To try it by hand, start the fake server (`node --experimental-strip-types test/fake-jira.ts`), install the build into an app data folder of your own with `EIDOS_APP_DATA=/tmp/eidos-try/app pnpm install-local`, and use that same `EIDOS_APP_DATA` in a scratch root.
+
+## License
+
+[MIT](LICENSE)

@@ -72,6 +72,10 @@ before(async () => {
   const dir = path.join(scratch, 'app', 'plugins', 'jira', version);
   mkdirSync(dir, { recursive: true });
   for (const file of ['manifest.yaml', 'cli.js', 'instructions.md']) copyFileSync(path.join(repo, 'dist', file), path.join(dir, file));
+  // a CLI built from source still carries the last release's version, so the copy asks for the CLI under test; the release keeps its min_host
+  const cliVersion = /eidosmd (\S+)/.exec(await ok(['--version']))?.[1] ?? '';
+  const manifest = path.join(dir, 'manifest.yaml');
+  writeFileSync(manifest, readFileSync(manifest, 'utf8').replace(/^min_host: .*$/m, `min_host: ${cliVersion}`));
   await ok(['install', '--blank', root, '--product', 'Scratch', '--yes', '--offline']);
   await ok(['plugin', 'enable', 'backlog']);
   await ok(['plugin', 'enable', 'assets']);
@@ -164,7 +168,7 @@ test('Jira Pull REQ1, REQ2, REQ4, REQ7 to REQ10: a fetch writes nothing; a pull 
   assert.match(thread, /author: Grace Example\n\s+at: 2026-10-02T10:00:00.000Z\n\s+external: jira:30001/);
   assert.doesNotMatch(thread, /Internal note/, 'a restricted comment is not pulled');
   const users = await ok(['users', 'list']);
-  assert.doesNotMatch(users, /Grace Example|Lin Example/, 'a pull adds nobody to the root\'s users');
+  assert.doesNotMatch(users, /Grace Example|Lin Example/, "a pull adds nobody to the root's users");
   assert.ok(fake.state.requests.filter((request) => request.startsWith('POST /rest/api/3/search/jql')).length >= 2, 'the limited search was asked again');
 });
 

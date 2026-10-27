@@ -166,4 +166,3 @@ export function adfToMarkdown(value: unknown, context: AdfContext = NONE): strin
   if (typeof node !== 'object' || typeof node.type !== 'string') return '';
   return (node.type === 'doc' ? blocks(node.content, context) : block(node, context)).replace(/[ \t]+$/gm, (spaces) => (spaces === '  ' ? spaces : '')).trim();
 }
-

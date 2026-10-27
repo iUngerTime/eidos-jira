@@ -67,7 +67,10 @@ function backlogOf(host: Host): BacklogApi {
 // `add_people` (Jira REQ15), refused on a host that cannot add a person, before anything is read
 function addPeople(host: Host): boolean {
   if (host.settings().get<boolean>('add_people') !== true) return false;
-  if (!host.addPerson) throw new Error(`add_people is on, and this Eidos CLI (${host.version}) cannot add a person for a plugin; update to eidosmd 0.17.0 or later, or turn it off (eidos plugin set jira add_people false)`);
+  if (!host.addPerson)
+    throw new Error(
+      `add_people is on, and this Eidos CLI (${host.version}) cannot add a person for a plugin; update to eidosmd 0.17.0 or later, or turn it off (eidos plugin set jira add_people false)`,
+    );
   return true;
 }
 
@@ -208,7 +211,7 @@ const entry: CliEntry = {
         .description('sign in to a Jira site with your Atlassian email and an API token, checked against Jira before it is kept')
         .action(
           action(async (site: string, options: { global?: boolean; email?: string }) => {
-                      let email = options.email?.trim() ?? '';
+            let email = options.email?.trim() ?? '';
             let token = '';
             if (process.stdin.isTTY) {
               if (!email) email = await ask('Atlassian email: ', false);
@@ -235,7 +238,7 @@ const entry: CliEntry = {
         .description("remove this root's and this machine's sign-in to a site, and its tokens from the credentials file")
         .action(
           action(async (site: string) => {
-                      const out = await removeSignIn(host, site);
+            const out = await removeSignIn(host, site);
             print(out.length > 0 ? `Signed out of ${siteKey(site)}: ${out.join(', ')}.` : `Nobody was signed in to ${siteKey(site)} here.`);
           }),
         );

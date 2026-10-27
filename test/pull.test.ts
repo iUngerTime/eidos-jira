@@ -71,7 +71,8 @@ before(async () => {
   // the release as `eidos plugin install` places it
   const dir = path.join(scratch, 'app', 'plugins', 'jira', version);
   mkdirSync(dir, { recursive: true });
-  for (const file of ['manifest.yaml', 'cli.js', 'instructions.md']) copyFileSync(path.join(repo, 'dist', file), path.join(dir, file));
+  // only the files a Registry listing pins, as a Registry install downloads them; the guide rides in the manifest
+  for (const file of ['manifest.yaml', 'cli.js']) copyFileSync(path.join(repo, 'dist', file), path.join(dir, file));
   // a CLI built from source still carries the last release's version, so the copy asks for the CLI under test; the release keeps its min_host
   const cliVersion = /eidosmd (\S+)/.exec(await ok(['--version']))?.[1] ?? '';
   const manifest = path.join(dir, 'manifest.yaml');

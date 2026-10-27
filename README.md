@@ -8,10 +8,10 @@ Status: pull only. Push (Eidos to Jira) is not built.
 
 ## Install
 
-Once it is published to the Registry:
+From the Registry:
 
 ```bash
-eidos plugin install @iungertime/jira
+eidos plugin install @iUngerTime/jira
 ```
 
 ```bash

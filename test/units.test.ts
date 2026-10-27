@@ -136,6 +136,32 @@ test('Jira REQ12: a draft matches names and categories and proposes the sprint f
   assert.equal(find('fields', 'customfield_10020'), 'milestone');
 });
 
+test('Jira REQ12: a priority with no Backlog priority of its name is drafted by its rank, and a sub-task type is drafted to the default type', () => {
+  const description: Description = {
+    ...DESCRIPTION,
+    priorities: ['Urgent', 'Moderate', 'Medium', 'Deferred'],
+    types: [...DESCRIPTION.types, { id: '10003', name: 'Sub-task', subtask: true, statuses: [], fields: [] }],
+  };
+  const { entries, unmatched } = draftMapping(connection(), BOARD, description);
+  const entry = (part: string, jira: string) => entries.find((held) => held.part === part && held.jira === jira);
+  assert.deepEqual(
+    ['Urgent', 'Moderate', 'Medium', 'Deferred'].map((name) => [name, entry('priorities', name)?.eidos, entry('priorities', name)?.why]),
+    [
+      ['Urgent', 'high', 'by rank (1 of 4)'],
+      ['Moderate', 'medium', 'by rank (2 of 4)'],
+      ['Medium', 'medium', 'same name'],
+      ['Deferred', 'low', 'by rank (4 of 4)'],
+    ],
+    "past the Backlog's last, the lowest",
+  );
+  assert.equal(entry('types', 'Sub-task')?.eidos, 'default', 'a sub-task type is carried, filed by the parent rule');
+  assert.deepEqual(
+    unmatched.filter((line) => /priority|Sub-task/.test(line)),
+    [],
+  );
+  assert.match(draftMapping(connection(), { ...BOARD, priorities: [] }, description).unmatched.join('\n'), /priority Urgent: the Backlog has no priorities/);
+});
+
 test('Jira REQ2, REQ3: a connection is read forgivingly, and one the other way over the same project is found', () => {
   assert.equal(readConnection({ name: 'x' }), null);
   const pull = readConnection({ name: 'a', site: 'acme.atlassian.net', project: 'acme', direction: 'pull' })!;

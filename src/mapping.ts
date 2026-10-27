@@ -236,9 +236,9 @@ export interface DraftEntry {
   why: string;
 }
 
-// Jira REQ12, without the AI Agent: a mapping drafted by matching names and
-// categories, each entry one the person accepts or rejects. An entry the
-// mapping already holds is not proposed again.
+// Jira REQ12, without the AI Agent: a mapping drafted by matching names,
+// categories, and a priority's rank, each entry one the person accepts or
+// rejects. An entry the mapping already holds is not proposed again.
 export function draftMapping(connection: Connection, board: BoardSettings, description: Description): { entries: DraftEntry[]; unmatched: string[] } {
   const entries: DraftEntry[] = [];
   const unmatched: string[] = [];
@@ -248,7 +248,7 @@ export function draftMapping(connection: Connection, board: BoardSettings, descr
     const match = board.types.find((candidate) => same(candidate.name, type.name) || same(candidate.title, type.name));
     if (match) entries.push({ part: 'types', jira: type.name, eidos: match.name, why: 'same name' });
     else if (!type.subtask) entries.push({ part: 'types', jira: type.name, eidos: DEFAULT_TYPE, why: 'no type of that name; the default type' });
-    else unmatched.push(`issue type ${type.name} (a sub-task type): no Backlog type of that name`);
+    else entries.push({ part: 'types', jira: type.name, eidos: DEFAULT_TYPE, why: 'a sub-task type; the default type, each filed by the parent rule' });
   }
   for (const status of allStatuses(description)) {
     if (held('statuses', status.name)) continue;
@@ -260,12 +260,17 @@ export function draftMapping(connection: Connection, board: BoardSettings, descr
       else unmatched.push(`status ${status.name}: no Backlog status in its category`);
     }
   }
-  for (const priority of description.priorities) {
-    if (held('priorities', priority)) continue;
+  // a priority with no Backlog priority of its name takes the one at its rank, both lists running from the highest, the
+  // lowest for a Jira priority past the Backlog's last
+  description.priorities.forEach((priority, rank) => {
+    if (held('priorities', priority)) return;
     const match = board.priorities.find((candidate) => same(candidate, priority));
     if (match) entries.push({ part: 'priorities', jira: priority, eidos: match, why: 'same name' });
-    else unmatched.push(`priority ${priority}: no Backlog priority of that name`);
-  }
+    else if (board.priorities.length > 0) {
+      const byRank = board.priorities[Math.min(rank, board.priorities.length - 1)]!;
+      entries.push({ part: 'priorities', jira: priority, eidos: byRank, why: `by rank (${rank + 1} of ${description.priorities.length})` });
+    } else unmatched.push(`priority ${priority}: the Backlog has no priorities`);
+  });
   for (const type of description.link_types) {
     if (held('link_types', type.name)) continue;
     const match = board.link_types.find((candidate) => same(candidate.name, type.name) || same(candidate.outward, type.outward));

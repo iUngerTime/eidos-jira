@@ -117,7 +117,8 @@ test('Jira REQ2, REQ3: a connection is written to the shared settings; another o
 });
 
 test('Jira REQ6, REQ12: describe reads the board and keeps it in local/; map drafts by names and categories and writes only what is accepted', async () => {
-  const described = JSON.parse(await ok(['jira', 'describe', 'acme', '--json'])) as { columns: unknown[]; types: Array<{ name: string }>; sprint_field: string };
+  const described = JSON.parse(await ok(['jira', 'describe', 'acme', '--json'])) as { columns: Array<{ name: string; statuses: string[] }>; types: Array<{ name: string }>; sprint_field: string };
+  assert.deepEqual(described.columns.at(-1), { name: 'Client Review', statuses: ['Client Review'] }, "a column's status the project's list leaves out is named, not left as its id");
   assert.deepEqual(
     described.types.map((type) => type.name),
     ['Epic', 'Story', 'Bug', 'Sub-task'],
@@ -126,10 +127,11 @@ test('Jira REQ6, REQ12: describe reads the board and keeps it in local/; map dra
   assert.ok(existsSync(path.join(root, '.eidos', 'plugins', 'jira', 'local', 'describe-acme.json')));
   const drafted = await ok(['jira', 'map', 'acme']);
   assert.match(drafted, /statuses: Code Review → In Progress \(same category \(in_progress\)\)/);
+  assert.match(drafted, /priorities: Highest → high \(by rank \(1 of 4\)\)/);
+  assert.match(drafted, /types: Sub-task → default/);
   assert.match(drafted, /Nothing written/);
   assert.doesNotMatch(readFileSync(path.join(root, '.eidos', 'plugins', 'jira', 'settings.yaml'), 'utf8'), /statuses/);
   await ok(['jira', 'map', 'acme', '--yes']);
-  await ok(['jira', 'configure:map', 'acme', 'set', 'types', 'Sub-task', 'default']);
   assert.match(readFileSync(path.join(root, '.eidos', 'plugins', 'jira', 'settings.yaml'), 'utf8'), /jira: Sub-task\n\s+eidos: default/);
 });
 

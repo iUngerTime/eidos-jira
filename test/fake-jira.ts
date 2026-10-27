@@ -185,9 +185,12 @@ export async function startFakeJira(state: FakeState = seed()): Promise<{ url: s
             { name: 'To Do', statuses: [{ id: '1' }] },
             { name: 'In Progress', statuses: [{ id: '3' }, { id: '4' }] },
             { name: 'Done', statuses: [{ id: '5' }] },
+            // a status the project's own list leaves out, as a board shared with another project's workflow holds
+            { name: 'Client Review', statuses: [{ id: '10001' }] },
           ],
         },
       });
+    if (path === '/rest/api/3/status/10001') return send(200, { id: '10001', name: 'Client Review', statusCategory: { key: 'indeterminate' } });
     if (path === '/rest/api/3/filter/10000') return send(200, { jql: 'project = ACME ORDER BY Rank ASC' });
     if (path === '/rest/api/3/project/ACME/statuses')
       return send(

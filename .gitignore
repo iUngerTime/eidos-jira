@@ -1,3 +1,6 @@
 node_modules/
 dist/
 *.log
+
+# a local trial against a real Jira site: its root, app data, and credentials file, never committed
+trial/

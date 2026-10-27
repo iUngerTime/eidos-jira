@@ -90,6 +90,14 @@ export async function readDescription(client: Requester, connection: Connection)
     const configuration = await client.get<{ filter?: { id?: string }; columnConfig?: { columns?: Array<{ name: string; statuses?: Array<{ id: string }> }> } }>(
       `/rest/agile/1.0/board/${connection.board}/configuration`,
     );
+    // a board column may hold a status the project's own list leaves out (one of another project's workflow); it is named
+    // by its id, and kept as the id only where the site will not say
+    for (const column of configuration.columnConfig?.columns ?? [])
+      for (const status of column.statuses ?? []) {
+        if (statusNames.has(status.id)) continue;
+        const found = await client.get<{ name?: string }>(`/rest/api/3/status/${encodeURIComponent(status.id)}`).catch(() => null);
+        statusNames.set(status.id, found?.name ?? status.id);
+      }
     columns = (configuration.columnConfig?.columns ?? []).map((column) => ({ name: column.name, statuses: (column.statuses ?? []).map((status) => statusNames.get(status.id) ?? status.id) }));
     if (configuration.filter?.id) filter = (await client.get<{ jql?: string }>(`/rest/api/3/filter/${configuration.filter.id}`)).jql ?? null;
   }

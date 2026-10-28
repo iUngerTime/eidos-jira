@@ -420,7 +420,7 @@ function JiraView(): JSX.Element {
                   <Button size="sm" disabled={busy !== null} onClick={() => void fetchOne(connection.name)}>
                     {t(busy === `fetch:${connection.name}` ? 'fetching' : 'fetch')}
                   </Button>
-                  <Button size="sm" variant="primary" disabled={busy !== null || mappedCount(connection) === 0} onClick={() => void pullOne(connection.name)}>
+                  <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void pullOne(connection.name)}>
                     {t(busy === `pull:${connection.name}` ? 'pulling' : 'pull')}
                   </Button>
                 </Row>

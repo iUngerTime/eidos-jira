@@ -68,6 +68,13 @@ const en = {
   autoFetchHint: 'Fetch every board this often while the app has the root open. Nothing pulls on its own. Yours alone.',
   autoFetchOff: 'Off',
   autoFetchEvery: 'Every {n} minutes',
+  noBoards: 'No Jira board is connected to this root yet.',
+  connectBoard: 'Connect a board',
+  notFetched: 'Not fetched yet',
+  fetchFailed: 'The last fetch failed: {error}',
+  upToDate: 'Up to date',
+  toPull: '{n} to pull',
+  openSettings: 'Jira settings',
 };
 
 const es: Partial<typeof en> = {
@@ -135,6 +142,13 @@ const es: Partial<typeof en> = {
   autoFetchHint: 'Consulta cada tablero con esta frecuencia mientras la app tiene la raíz abierta. Nada se trae solo. Solo tuyo.',
   autoFetchOff: 'Desactivado',
   autoFetchEvery: 'Cada {n} minutos',
+  noBoards: 'Todavía no hay ningún tablero de Jira conectado a esta raíz.',
+  connectBoard: 'Conectar un tablero',
+  notFetched: 'Aún sin consultar',
+  fetchFailed: 'La última consulta falló: {error}',
+  upToDate: 'Al día',
+  toPull: '{n} por traer',
+  openSettings: 'Ajustes de Jira',
 };
 
 const pt: Partial<typeof en> = {
@@ -202,6 +216,13 @@ const pt: Partial<typeof en> = {
   autoFetchHint: 'Consulta cada quadro com esta frequência enquanto o app tem a raiz aberta. Nada é trazido sozinho. Só seu.',
   autoFetchOff: 'Desligado',
   autoFetchEvery: 'A cada {n} minutos',
+  noBoards: 'Nenhum quadro do Jira está conectado a esta raiz ainda.',
+  connectBoard: 'Conectar um quadro',
+  notFetched: 'Ainda não consultado',
+  fetchFailed: 'A última consulta falhou: {error}',
+  upToDate: 'Atualizado',
+  toPull: '{n} para trazer',
+  openSettings: 'Configurações do Jira',
 };
 
 export const JIRA_STRINGS = { en, es, pt };

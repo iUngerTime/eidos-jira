@@ -27,7 +27,7 @@ import {
   type Pair,
 } from './connections.ts';
 import { cachedDescription, keepDescription, readDescription, type Description } from './describe.ts';
-import { checkMapping, compactFields, draftMapping, editorModel, type DraftEntry, type EditorModel, type MappingChoice, type MappingProblem, PARENT_RULES } from './mapping.ts';
+import { checkMapping, compactFields, defaultFields, draftMapping, editorModel, type DraftEntry, type EditorModel, type MappingChoice, type MappingProblem, PARENT_RULES } from './mapping.ts';
 import { ask, confirm, readLines } from './prompt.ts';
 import { create as createIssue, parentsFirst, prepareCreate, type CreateOptions, type CreatePlan, type Created } from './create.ts';
 import { heldOf, readState, run, skipOf, writeState, type Done, type Plan } from './pull.ts';
@@ -61,7 +61,7 @@ export interface JiraApi {
     jira: string,
     eidos: string | null,
     types?: string[],
-    marks?: { push?: boolean; owner?: 'jira' | 'eidos' },
+    marks?: { push?: boolean; owner?: 'jira' | 'eidos'; also?: boolean; only?: string },
   ): Promise<{ connection: Connection; problems: MappingProblem[] }>;
   problems(name: string): MappingProblem[];
   // The mapping editor's half (Jira REQ12): what it draws, the whole mapping it saves, and a property made for a field
@@ -407,14 +407,20 @@ const entry: CliEntry = {
           if (!from) throw new Error('name the Jira side');
           if (types.length > 0 && part !== 'fields') throw new Error('only a field pair names issue types');
           const named = (type: string): boolean => types.some((held) => held.toLowerCase() === type.toLowerCase());
+          // --also adds a section beside the ones a field already goes to, a bundle (Jira REQ21), starting from the
+          // default fields where the connection names none; an unset naming the section takes out that one alone
+          const held = part === 'fields' && marks.also && next.mapping.fields === undefined ? defaultFields(backlogOf(host).settings()) : (next.mapping[part] ?? []);
+          const sameSide = (pair: Pair, eidos: string | null | undefined): boolean => eidos !== null && eidos !== undefined && pair.eidos.toLowerCase() === eidos.toLowerCase();
           const rest =
-            types.length === 0
-              ? (next.mapping[part] ?? []).filter((pair) => pair.jira.toLowerCase() !== from.toLowerCase())
-              : (next.mapping[part] ?? []).flatMap((pair) => {
-                  if (pair.jira.toLowerCase() !== from.toLowerCase() || !pair.types?.length) return [pair];
-                  const left = pair.types.filter((type) => !named(type));
-                  return left.length > 0 ? [{ ...pair, types: left }] : [];
-                });
+            part === 'fields' && (marks.also || marks.only)
+              ? held.filter((pair) => !(pair.jira.toLowerCase() === from.toLowerCase() && sameSide(pair, marks.also ? to : marks.only)))
+              : types.length === 0
+                ? held.filter((pair) => pair.jira.toLowerCase() !== from.toLowerCase())
+                : held.flatMap((pair) => {
+                    if (pair.jira.toLowerCase() !== from.toLowerCase() || !pair.types?.length) return [pair];
+                    const left = pair.types.filter((type) => !named(type));
+                    return left.length > 0 ? [{ ...pair, types: left }] : [];
+                  });
           if (marks.push && part === 'fields') throw new Error('--push names the Jira value a Backlog value is sent as; a field takes --owner');
           if (marks.owner && part !== 'fields') throw new Error('--owner is for a field pair');
           // the one Jira value a Backlog value is sent as: marking one unmarks the others of that Backlog value
@@ -743,35 +749,40 @@ const entry: CliEntry = {
         .option('--types <names>', "a field pair's issue types, comma-separated; the pair then holds for those types alone")
         .option('--push', 'the Jira value a sync or a create sends for the Backlog value, where several Jira values read as it')
         .option('--owner <side>', "a field's owner: jira (never sent) or eidos (never pulled over; a Jira change is a conflict)")
+        .option('--also', 'set: add the section beside the ones the field already goes to, bundled into it under its title; unset: take out only the section named')
         .description('change one entry of a mapping')
         .action(
-          action(async (name: string, operation: string, part: string, from: string | undefined, to: string | undefined, options: { types?: string; push?: boolean; owner?: string }) => {
-            if (options.owner !== undefined && options.owner !== 'jira' && options.owner !== 'eidos') throw new Error('--owner is jira or eidos');
-            const connection = connectionNamed(host, name);
-            if (operation !== 'set' && operation !== 'unset') throw new Error('the operation is set or unset');
-            if (part !== 'parent' && operation === 'set' && !to) throw new Error('name the Eidos side to set it to');
-            const unset = operation === 'unset';
-            const types = (options.types ?? '')
-              .split(',')
-              .map((type) => type.trim())
-              .filter(Boolean);
-            // a part the mapping did not hold yet carries only what it names once it holds one entry (Jira REQ7), so the
-            // person is told what the first entry of it starts leaving out
-            const starts = operation === 'set' && (['types', 'priorities', 'link_types', 'fields'] as string[]).includes(part) && connection.mapping[part as MappingPart] === undefined;
-            const known = [...MAPPING_PARTS, 'parent', 'transition_fields', 'create.types', 'create.fields'];
-            if (!known.includes(part)) throw new Error(`a part is one of ${known.join(', ')}`);
-            const { problems } = await api.setPair(connection.name, part as Parameters<JiraApi['setPair']>[1], from ?? '', unset ? null : part === 'parent' ? (from ?? '') : (to ?? ''), types, {
-              ...(options.push ? { push: true } : {}),
-              ...(options.owner ? { owner: options.owner as 'jira' | 'eidos' } : {}),
-            });
-            const scope = types.length > 0 ? ` (${types.join(', ')})` : '';
-            print(`${connection.name}: ${part} ${operation === 'set' ? `${from} → ${part === 'parent' ? '' : to}${scope}` : `${from ?? ''}${scope} unset`}`.trim());
-            for (const problem of problems) print(`  jira/${problem.code}: ${problem.message}`);
-            if (starts)
-              print(
-                `  note: ${connection.name} had no ${part} part, so every ${part === 'fields' ? 'default field' : part.replace(/_/g, ' ').replace(/s$/, '')} went by its name; from now on only the ${part} named here are carried (eidos jira map ${connection.name} drafts the rest)`,
-              );
-          }),
+          action(
+            async (name: string, operation: string, part: string, from: string | undefined, to: string | undefined, options: { types?: string; push?: boolean; owner?: string; also?: boolean }) => {
+              if (options.owner !== undefined && options.owner !== 'jira' && options.owner !== 'eidos') throw new Error('--owner is jira or eidos');
+              const connection = connectionNamed(host, name);
+              if (operation !== 'set' && operation !== 'unset') throw new Error('the operation is set or unset');
+              if (part !== 'parent' && operation === 'set' && !to) throw new Error('name the Eidos side to set it to');
+              const unset = operation === 'unset';
+              const types = (options.types ?? '')
+                .split(',')
+                .map((type) => type.trim())
+                .filter(Boolean);
+              // a part the mapping did not hold yet carries only what it names once it holds one entry (Jira REQ7), so the
+              // person is told what the first entry of it starts leaving out
+              const starts = operation === 'set' && (['types', 'priorities', 'link_types', 'fields'] as string[]).includes(part) && connection.mapping[part as MappingPart] === undefined;
+              const known = [...MAPPING_PARTS, 'parent', 'transition_fields', 'create.types', 'create.fields'];
+              if (!known.includes(part)) throw new Error(`a part is one of ${known.join(', ')}`);
+              const { problems } = await api.setPair(connection.name, part as Parameters<JiraApi['setPair']>[1], from ?? '', unset ? null : part === 'parent' ? (from ?? '') : (to ?? ''), types, {
+                ...(options.push ? { push: true } : {}),
+                ...(options.owner ? { owner: options.owner as 'jira' | 'eidos' } : {}),
+                ...(options.also && !unset ? { also: true } : {}),
+                ...(options.also && unset && to ? { only: to } : {}),
+              });
+              const scope = types.length > 0 ? ` (${types.join(', ')})` : '';
+              print(`${connection.name}: ${part} ${operation === 'set' ? `${from} → ${part === 'parent' ? '' : to}${scope}` : `${from ?? ''}${scope} unset`}`.trim());
+              for (const problem of problems) print(`  jira/${problem.code}: ${problem.message}`);
+              if (starts)
+                print(
+                  `  note: ${connection.name} had no ${part} part, so every ${part === 'fields' ? 'default field' : part.replace(/_/g, ' ').replace(/s$/, '')} went by its name; from now on only the ${part} named here are carried (eidos jira map ${connection.name} drafts the rest)`,
+                );
+            },
+          ),
         );
 
       command

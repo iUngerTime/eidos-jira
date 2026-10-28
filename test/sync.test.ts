@@ -161,7 +161,10 @@ test('Jira Sync REQ9: a description edited here goes back with the mention and t
   const description = (writesSince(before)[0]!.body['fields'] as { description: { content: Array<{ type: string; content?: Array<{ type: string }> }> } }).description;
   const kinds = description.content.map((node) => node.type);
   assert.deepEqual(kinds, ['heading', 'paragraph', 'bulletList', 'codeBlock', 'mediaSingle']);
-  assert.ok(description.content[1]!.content!.some((node) => node.type === 'mention'), "the paragraph with the mention went back as Jira's own");
+  assert.ok(
+    description.content[1]!.content!.some((node) => node.type === 'mention'),
+    "the paragraph with the mention went back as Jira's own",
+  );
   assert.doesNotMatch(out, /drops from Jira/);
 });
 
@@ -261,7 +264,13 @@ test('Jira Sync REQ6: a message Jira took whose answer was lost is taken in by t
   // as a sync cut short leaves it: Jira holds the comment, the thread holds the message unsent
   const held = issue('ACME-2');
   const at = jiraNow();
-  held.fields.comments.push({ id: '39999', author: { accountId: '557058:tester', displayName: 'Tester', emailAddress: EMAIL }, body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Checked on an iPhone SE too.' }] }] }, created: at, updated: at });
+  held.fields.comments.push({
+    id: '39999',
+    author: { accountId: '557058:tester', displayName: 'Tester', emailAddress: EMAIL },
+    body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Checked on an iPhone SE too.' }] }] },
+    created: at,
+    updated: at,
+  });
   held.fields.updated = at;
   await ok(['jira', 'pull', 'acme']);
   const messages = threadsOf(await ok(['comments', 'backlog:T-ACME-2', '--json']))
@@ -279,13 +288,24 @@ test('Jira Sync REQ11: jira comment sends a comment to an issue with no thread y
   assert.equal(thread.messages.at(-1)!.text, 'Fixed on the SE as well.');
   assert.match(thread.messages.at(-1)!.external ?? '', /^jira:/);
   await ok(['jira', 'pull', 'acme']);
-  assert.equal(threadsOf(await ok(['comments', 'backlog:T-ACME-3', '--json'])).flatMap((held) => held.messages).filter((message) => message.text === 'Fixed on the SE as well.').length, 1);
+  assert.equal(
+    threadsOf(await ok(['comments', 'backlog:T-ACME-3', '--json']))
+      .flatMap((held) => held.messages)
+      .filter((message) => message.text === 'Fixed on the SE as well.').length,
+    1,
+  );
 });
 
 test('Jira Sync REQ6: a sync leaves the next pull to read the issue, so a colleague’s comment made alongside it still comes in', async () => {
   const held = issue('ACME-3');
   const at = jiraNow();
-  held.fields.comments.push({ id: '39998', author: { accountId: '557058:grace', displayName: 'Grace Example' }, body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Seen on Android too.' }] }] }, created: at, updated: at });
+  held.fields.comments.push({
+    id: '39998',
+    author: { accountId: '557058:grace', displayName: 'Grace Example' },
+    body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Seen on Android too.' }] }] },
+    created: at,
+    updated: at,
+  });
   held.fields.updated = at;
   await ok(['backlog', 'set', 'T-ACME-3', '--title', 'Login button misaligned (iOS, Android)']);
   assert.match(await ok(['jira', 'sync', 'T-ACME-3', '--take', 'title=eidos', '--yes']), /sent title/);
@@ -319,4 +339,75 @@ test("Jira Sync: a task marked Don't sync is the root's own, never pulled over, 
   assert.match(await ok(['jira', 'skip', 'T-ACME-3', '--off']), /syncs with Jira again/);
   assert.match(readFileSync(taskFile('T-ACME-3'), 'utf8'), /\n {2}key: ACME-3\n/);
   assert.doesNotMatch(readFileSync(taskFile('T-ACME-3'), 'utf8'), /skip:/);
+});
+
+test('Jira REQ21, Jira Sync REQ17: sections bundled into the description go as one text under their headings, come back split, and a section Jira has no heading for is left alone', async () => {
+  // an earlier test left the connection carrying the title and status alone; the description goes back to its section first
+  await ok(['jira', 'configure:map', 'acme', 'set', 'fields', 'description', 'section:description']);
+  const mapped = await ok(['jira', 'configure:map', 'acme', 'set', 'fields', 'description', 'section:acceptance-criteria', '--also']);
+  assert.match(mapped, /acme: fields description → section:acceptance-criteria/);
+  // the title an earlier test left changed on both sides is settled first, so only the sections move
+  await ok(['jira', 'sync', 'T-ACME-3', '--take', 'title=jira', '--yes']);
+  await ok([
+    'backlog',
+    'set',
+    'T-ACME-3',
+    '--body',
+    'description=Misaligned on small screens.',
+    '--add-line',
+    'acceptance-criteria=Aligned on iOS',
+    '--add-line',
+    'acceptance-criteria=Aligned on Android',
+  ]);
+  await ok(['backlog', 'check', 'T-ACME-3', '1']);
+  const plan = (await eidos(['jira', 'sync', 'T-ACME-3', '--dry-run'])).stdout;
+  // the description's Jira side was never recorded (its pair was just mapped again), so it is put to the person; the
+  // criteria, which Jira's text has no heading for, are simply sent
+  assert.match(plan, /! section:description/);
+  assert.match(plan, /→ section:acceptance-criteria/);
+  assert.doesNotMatch(plan, /! section:acceptance-criteria/, 'a section Jira has no heading for is no conflict');
+  assert.match(await ok(['jira', 'sync', 'T-ACME-3', '--take', 'section:description=eidos', '--yes']), /synced ACME-3: sent section:description, section:acceptance-criteria/);
+  type Block = { type: string; attrs?: Record<string, unknown>; content?: Block[]; text?: string };
+  const held = issue('ACME-3').fields['description'] as { content: Block[] };
+  const words = (node: Block): string => (node.text ?? '') + (node.content ?? []).map(words).join('');
+  assert.deepEqual(
+    held.content.map((block) => block.type),
+    ['paragraph', 'heading', 'taskList'],
+    'the description, then the criteria under their heading as a task list',
+  );
+  assert.equal(words(held.content[1]!), 'Acceptance Criteria');
+  assert.deepEqual(
+    held.content[2]!.content!.map((item) => [item.attrs?.['state'], words(item)]),
+    [
+      ['DONE', 'Aligned on iOS'],
+      ['TODO', 'Aligned on Android'],
+    ],
+  );
+  assert.match(await ok(['jira', 'sync', 'T-ACME-3', '--dry-run']), /level: nothing to sync/);
+
+  // a criterion changed in Jira comes back to its section, numbered, and the description is left as it is
+  const changed = JSON.parse(JSON.stringify(held)) as { content: Block[] };
+  const second = changed.content[2]!.content![1]!;
+  second.attrs = { ...second.attrs, state: 'DONE' };
+  second.content = [{ type: 'text', text: 'Aligned on Android 14' }];
+  touch(fake.state, 'ACME-3', { description: changed }, jiraNow());
+  await ok(['jira', 'pull', 'acme']);
+  const text = readFileSync(taskFile('T-ACME-3'), 'utf8');
+  assert.match(text, /- \[x\] #1 Aligned on iOS\n- \[x\] #2 Aligned on Android 14/);
+  assert.match(text, /Misaligned on small screens\./);
+  assert.match(await ok(['jira', 'sync', 'T-ACME-3', '--dry-run']), /level: nothing to sync/);
+
+  // ACME-2's description has no criteria heading: a pull leaves its criteria as the root has them, and a sync sends them
+  await ok(['backlog', 'set', 'T-ACME-2', '--add-line', 'acceptance-criteria=Works offline']);
+  await ok(['jira', 'pull', 'acme', '--full']);
+  assert.match(readFileSync(taskFile('T-ACME-2'), 'utf8'), /- \[ \] #1 Works offline/);
+  const toSend = await ok(['jira', 'sync', 'T-ACME-2', '--dry-run']);
+  assert.match(toSend, /→ section:acceptance-criteria/);
+  assert.doesNotMatch(toSend, /! section:acceptance-criteria/);
+
+  const unmapped = await ok(['jira', 'configure:map', 'acme', 'unset', 'fields', 'description', 'section:acceptance-criteria', '--also']);
+  assert.match(unmapped, /acme: fields description unset/);
+  const settings = readFileSync(path.join(root, '.eidos', 'plugins', 'jira', 'settings.yaml'), 'utf8');
+  assert.doesNotMatch(settings, /acceptance-criteria/);
+  assert.match(settings, /jira: description\n\s+eidos: section:description/, 'the description keeps its own section');
 });

@@ -13,6 +13,7 @@ import { adfToMarkdown, type AdfContext } from './adf.ts';
 import { siteBase, type Requester } from './client.ts';
 import { siteKey, type Connection, type Pair } from './connections.ts';
 import { cachedDescription, categoryOf } from './describe.ts';
+import { bundlesOf, checklistFromJira, partPairs, realField as realFieldOf, sectionOf, splitIssue } from './bundle.ts';
 import { DEFAULT_TYPE, fieldsFor, fieldsOf, linkTypeFor, priorityFor, statusFor, typeFor } from './mapping.ts';
 import type { AssetsApi, BacklogApi, BoardSettings, CommentsApi, TaskFields, TaskView, ThreadView } from './types.ts';
 
@@ -363,6 +364,8 @@ interface Intent {
   parentIssue: string | null;
   parentKey: string | null;
   comments: JiraComment[] | null;
+  // the sections of a bundled field whose heading Jira's text lacks, which the pull leaves as the root has them (Jira REQ21)
+  absent: Set<string>;
 }
 
 // A Jira person as the root writes them (Jira REQ15): the root user of the
@@ -504,13 +507,24 @@ export async function run(context: Context, write: boolean, options: PullOptions
     const media = attachmentsFor(context, issue, task);
     const adf: AdfContext = { mention, media: media.link };
     const digest: Record<string, string> = { type: short(type) };
-    const issuePairs = fieldsFor(pairs, issue.fields.issuetype?.name ?? '');
-    const intended = intendFields(connection, board, issue, type, issuePairs, people, adf, carried, jiraPriorities);
+    // a field several sections are mapped to is read as one part per section (Jira REQ21)
+    const typePairs = fieldsFor(pairs, issue.fields.issuetype?.name ?? '');
+    const bundles = bundlesOf(typePairs);
+    const issuePairs = partPairs(typePairs, bundles);
+    const { issue: seen, absent } = splitIssue(issue, bundles, board);
+    const intended = intendFields(connection, board, seen, type, issuePairs, people, adf, carried, jiraPriorities);
     const { fields, parentIssue, parentKey } = intended;
     if (intended.sprint) sprints.set(intended.sprint.name, intended.sprint.end);
     if (intended.parentLeftOut) plan.left_out.parents += 1;
-    const remote: Record<string, string> = Object.fromEntries(issuePairs.map((pair) => [pair.eidos, remoteOf(issue, pair)]));
+    const remote: Record<string, string> = Object.fromEntries(issuePairs.map((pair) => [pair.eidos, remoteOf(seen, pair)]));
     for (const pair of issuePairs) if (pair.eidos !== 'parent') digest[pair.eidos] = short(normalise(intendedValue(fields, pair.eidos)));
+    // a section Jira's text holds no heading for keeps what was recorded of it, so a sync still sends it
+    for (const side of absent) {
+      if (was?.digest?.[side] !== undefined) digest[side] = was.digest[side];
+      else delete digest[side];
+      if (was?.remote?.[side] !== undefined) remote[side] = was.remote[side];
+      else delete remote[side];
+    }
     if (issuePairs.some((pair) => pair.eidos === 'parent')) digest['parent'] = short(parentIssue);
     const changes: string[] = [];
     const local: string[] = [];
@@ -521,6 +535,7 @@ export async function run(context: Context, write: boolean, options: PullOptions
           if ((task.parent ?? null) !== want) changes.push('parent');
           continue;
         }
+        if (absent.has(eidos)) continue;
         const now = heldValue(task, eidos);
         if (short(normalise(now)) !== short(normalise(intendedValue(fields, eidos)))) changes.push(eidos);
         // edited in the root: what it holds is no longer what the last pull wrote
@@ -530,7 +545,7 @@ export async function run(context: Context, write: boolean, options: PullOptions
     const comments = context.comments ? await commentsToPull(context, issue, task, was, options) : null;
     plan.attachments += media.downloads.length;
     const owned = task ? issuePairs.filter((pair) => pair.owner === 'eidos' && changes.includes(pair.eidos)).map((pair) => pair.eidos) : [];
-    intents.push({ issue, task, type, fields, digest, remote, changes, local: local.filter((eidos) => changes.includes(eidos)), owned, parentIssue, parentKey, comments });
+    intents.push({ issue: seen, task, type, fields, digest, remote, changes, local: local.filter((eidos) => changes.includes(eidos)), owned, parentIssue, parentKey, comments, absent });
     if (owned.length > 0) plan.owned.push({ key: issue.key, task: task!.id ?? task!.name, fields: owned });
     if (!task) plan.add.push({ key: issue.key, title: fields.title ?? issue.key, type });
     else if (changes.length > 0 || was?.key !== issue.key || was?.gone !== undefined) plan.change.push({ key: issue.key, task: task.id ?? task.name, fields: changes });
@@ -604,7 +619,8 @@ export async function run(context: Context, write: boolean, options: PullOptions
       if (options.keepLocal && intent.local.length > 0) done.kept_local += 1;
     }
     const parentTask = intent.parentIssue ? index.get(intent.parentIssue) : undefined;
-    const issuePairs = fieldsFor(pairs, issue.fields.issuetype?.name ?? '');
+    const typePairs = fieldsFor(pairs, issue.fields.issuetype?.name ?? '');
+    const issuePairs = partPairs(typePairs, bundlesOf(typePairs));
     if (issuePairs.some((pair) => pair.eidos === 'parent') && !kept.includes('parent')) fields.parent = parentTask ? (parentTask.id ?? parentTask.name) : null;
     const downloads = await downloadAttachments(context, issue, task);
     done.attachments += downloads;
@@ -652,10 +668,7 @@ export async function run(context: Context, write: boolean, options: PullOptions
     }
     // the digest of what the task holds now, after the Backlog wrote it (a section's text as its region reads), so the next fetch compares like with like
     const settled = Object.fromEntries(
-      Object.keys(jira.digest!).map((eidos) => [
-        eidos,
-        eidos === 'parent' ? jira.digest![eidos]! : kept.includes(eidos) ? jira.digest![eidos]! : short(normalise(heldValue(written, eidos))),
-      ]),
+      Object.keys(jira.digest!).map((eidos) => [eidos, eidos === 'parent' || kept.includes(eidos) || intent.absent.has(eidos) ? jira.digest![eidos]! : short(normalise(heldValue(written, eidos)))]),
     );
     if (JSON.stringify(settled) !== JSON.stringify(jira.digest)) written = backlog.set(written.id ?? written.name, { ...dates, tool: { jira: { ...jira, digest: settled } } });
     if (context.pullAttachments) linkAttachments(context, written, issue);
@@ -780,7 +793,9 @@ export function intendFields(
         break;
       }
       case 'section':
-        fields.sections = { ...(fields.sections ?? {}), [name]: asText(value, adf) };
+        // a part of a bundled field whose heading Jira's text lacks is left as the root has it
+        if (value === undefined && pair.jira !== realFieldOf(pair.jira)) break;
+        fields.sections = { ...(fields.sections ?? {}), [name]: sectionText(value, board, pair.eidos, adf) };
         break;
       case 'property':
         fields.properties = { ...(fields.properties ?? {}), [name]: asProperty(value, board, name, adf) };
@@ -794,6 +809,12 @@ export function intendFields(
 }
 
 // ---- fields -----------------------------------------------------------------------
+
+// A section's text from Jira: a checklist's task list read back as its numbered lines (Jira REQ21).
+function sectionText(value: unknown, board: BoardSettings, side: string, adf: AdfContext): string {
+  const text = asText(value, adf);
+  return sectionOf(board, side)?.type === 'checklist' ? checklistFromJira(text) : text;
+}
 
 function asText(value: unknown, adf: AdfContext): string {
   if (typeof value === 'object' && value !== null && (value as { type?: unknown }).type === 'doc') return adfToMarkdown(value, adf);
@@ -857,7 +878,7 @@ function rewriteTexts(fields: TaskFields, pairs: Pair[], issue: Issue, board: Bo
   for (const pair of pairs) {
     const [head, name = ''] = pair.eidos.split(/:(.*)/s);
     const value = issue.fields[pair.jira];
-    if (head === 'section' && fields.sections && name in fields.sections) fields.sections[name] = asText(value, adf);
+    if (head === 'section' && fields.sections && name in fields.sections) fields.sections[name] = sectionText(value, board, pair.eidos, adf);
     if (head === 'property' && fields.properties && name in fields.properties) fields.properties[name] = asProperty(value, board, name, adf);
   }
 }

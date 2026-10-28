@@ -20,6 +20,7 @@ import { JiraError, siteBase, type Requester } from './client.ts';
 import { siteKey, type Connection, type Pair } from './connections.ts';
 import { cachedDescription, categoryOf, keepDescription, readDescription, type Description, type JiraType } from './describe.ts';
 import { knownOf, lostNodes, markdownToAdf, type AdfDoc } from './markdown.ts';
+import { bundlesOf, composeText, partPairs, realField, splitIssue, type Bundle } from './bundle.ts';
 import { fieldsFor, fieldsOf, priorityFor, statusFor, syncOf, typeFor } from './mapping.ts';
 import {
   attachmentsFor,
@@ -154,14 +155,17 @@ export interface EditField {
 }
 
 interface Read {
+  // the issue as the sync compares it, each bundled field split into its sections' parts (Jira REQ21)
   issue: Issue & { editmeta?: { fields?: Record<string, EditField> }; transitions?: Transition[] };
+  // the issue as Jira holds it, which a bundled field is written against
+  whole: Read['issue'];
   type: JiraType | null;
 }
 
 const BASE_FIELDS = ['summary', 'description', 'status', 'priority', 'assignee', 'parent', 'issuetype', 'comment', 'attachment', 'updated', 'created'];
 
 async function readIssue(context: Context, id: string, pairs: Pair[]): Promise<Read['issue']> {
-  const fields = [...new Set([...BASE_FIELDS, ...pairs.map((pair) => pair.jira)])].join(',');
+  const fields = [...new Set([...BASE_FIELDS, ...pairs.map((pair) => realField(pair.jira))])].join(',');
   return context.client.get(`/rest/api/3/issue/${encodeURIComponent(id)}`, { fields, expand: 'editmeta,transitions.fields' });
 }
 
@@ -568,14 +572,16 @@ export interface Prepared {
   intendedNow: TaskFields;
   ranks: string[];
   options: SyncOptions;
+  // the issue type's pairs as the sync compares them, and the fields several sections are mapped to
+  pairs: Pair[];
+  bundles: Bundle[];
 }
 
 // A task by its id or name, or by its issue's key.
 export function taskFor(backlog: BacklogApi, ref: string): TaskView {
   const wanted = ref.trim().toLowerCase();
   const tasks = backlog.tasks();
-  const found =
-    tasks.find((task) => task.id?.toLowerCase() === wanted || task.name.toLowerCase() === wanted) ?? tasks.find((task) => heldOf(task)?.key.toLowerCase() === wanted) ?? null;
+  const found = tasks.find((task) => task.id?.toLowerCase() === wanted || task.name.toLowerCase() === wanted) ?? tasks.find((task) => heldOf(task)?.key.toLowerCase() === wanted) ?? null;
   if (!found) throw new SyncRefused(`no task ${ref} in this root`);
   return found;
 }
@@ -589,14 +595,19 @@ export async function prepare(context: Context, task: TaskView, options: SyncOpt
   if (held.pending) throw new SyncRefused(`${task.id ?? task.name} is waiting on a create that did not finish; eidos jira create ${task.id ?? task.name} finds its issue`);
   const board = backlog.settings();
   const pairs = fieldsOf(connection, board);
-  const read: Read = { issue: await readIssue(context, held.id, pairs), type: null };
+  const fetched = await readIssue(context, held.id, pairs);
+  const read: Read = { issue: fetched, whole: fetched, type: null };
   const jiraType = read.issue.fields.issuetype?.name ?? '';
   const described = await description(context);
   read.type = described.types.find((type) => same(type.name, jiraType)) ?? null;
   const ranks = connection.mapping.priorities === undefined ? described.priorities : [];
   const type = typeFor(connection.mapping, board, jiraType);
   if (type === null) throw new SyncRefused(`${read.issue.key} is a ${jiraType}, a type ${connection.name}'s mapping does not carry`);
-  const issuePairs = fieldsFor(pairs, jiraType);
+  const typePairs = fieldsFor(pairs, jiraType);
+  const bundles = bundlesOf(typePairs);
+  const issuePairs = partPairs(typePairs, bundles);
+  const split = splitIssue(fetched, bundles, board);
+  read.issue = split.issue;
   const people = peopleFor(context, false);
   const adf = adfFor(context, read.issue, task, people);
   // a parent counts as carried when its task is here, so the parent pair reads as a pull does
@@ -623,6 +634,30 @@ export async function prepare(context: Context, task: TaskView, options: SyncOpt
   const pulledSides: string[] = [];
   const sameSides: string[] = [];
   const take = (side: string): 'jira' | 'eidos' | undefined => options.take?.[side] ?? options.take?.['all'];
+  // a section of a bundled field to send waits for the others, since the field is written once from them all
+  const bundledOut: Array<{ side: string; entry: FieldPlan; remoteNow: string }> = [];
+  const send = (side: string, jira: string, out: Outgoing & { status?: StatusPlan }, remoteNow: string, entries: FieldPlan[]): void => {
+    if (out.kept) {
+      for (const entry of entries) {
+        entry.kept = true;
+        entry.reason = out.kept;
+      }
+    } else if (out.blocker) plan.blockers.push(out.blocker);
+    else if (out.status) plan.status = out.status;
+    else {
+      outgoing.set(side, { jira, value: out.value, remoteNow });
+      if (out.lost && out.lost.length > 0) {
+        plan.loss[side] = out.lost;
+        if (!(options.acceptLoss ?? []).some((agreed) => agreed === side || agreed === 'all'))
+          plan.blockers.push({
+            side,
+            code: 'loss',
+            message: `writing ${side} takes out of Jira what markdown cannot hold: ${out.lost.map((lost) => `${lost.count} ${lost.kind}`).join(', ')}`,
+            fix: `--accept-loss ${side}, or make the change in Jira and take Jira's (--take ${side}=jira)`,
+          });
+      }
+    }
+  };
 
   for (const pair of issuePairs) {
     const side = pair.eidos;
@@ -643,7 +678,9 @@ export async function prepare(context: Context, task: TaskView, options: SyncOpt
     // Jira's own value against its own base; a task pulled before the remote base was kept is read by the mapped value,
     // and a change the mapping folds away cannot be seen there, so a field changed here is put to the person
     const recorded = remoteBase !== undefined;
-    const changedThere = recorded ? remoteNow !== remoteBase : base === undefined ? local !== mapped : mapped !== base;
+    // a section Jira's text has no heading for is unchanged there, which needs no record of Jira's side (Jira Sync REQ17)
+    const absentThere = split.absent.has(side);
+    const changedThere = absentThere ? false : recorded ? remoteNow !== remoteBase : base === undefined ? local !== mapped : mapped !== base;
     const owner = syncOf(pair);
     const entry: FieldPlan = { side, jira: pair.jira, verdict: 'unchanged', eidos: shown(localValue), remote: shown(remoteValue), seen: remoteNow };
     if (side.startsWith('section:')) entry.text = { eidos: String(localValue ?? '').trim(), remote: String(remoteValue ?? '').trim() };
@@ -651,7 +688,7 @@ export async function prepare(context: Context, task: TaskView, options: SyncOpt
     if (!changedHere && !changedThere) verdict = 'unchanged';
     else if (local === mapped) verdict = 'same';
     else if (!changedHere) verdict = owner === 'push' ? 'conflict' : 'from-jira';
-    else if (!changedThere && recorded) verdict = owner === 'pull' ? 'conflict' : 'to-jira';
+    else if (!changedThere && (recorded || absentThere)) verdict = owner === 'pull' ? 'conflict' : 'to-jira';
     else verdict = 'conflict';
     if (verdict === 'conflict') {
       if (!changedHere && owner === 'push') entry.reason = `Jira changed ${side}, a field the root owns`;
@@ -695,27 +732,41 @@ export async function prepare(context: Context, task: TaskView, options: SyncOpt
     }
     if (verdict === 'same') sameSides.push(side);
     if (verdict === 'to-jira') {
-      const out = await outgoingFor(context, board, read, pair, editmeta, localValue, adf, options, side, ranks);
-      if (out.kept) {
-        entry.kept = true;
-        entry.reason = out.kept;
-      } else if (out.blocker) plan.blockers.push(out.blocker);
-      else if (out.status) plan.status = out.status;
-      else {
-        outgoing.set(side, { jira: pair.jira, value: out.value, remoteNow });
-        if (out.lost && out.lost.length > 0) {
-          plan.loss[side] = out.lost;
-          if (!(options.acceptLoss ?? []).some((agreed) => agreed === side || agreed === 'all'))
-            plan.blockers.push({
-              side,
-              code: 'loss',
-              message: `writing ${side} takes out of Jira what markdown cannot hold: ${out.lost.map((lost) => `${lost.count} ${lost.kind}`).join(', ')}`,
-              fix: `--accept-loss ${side}, or make the change in Jira and take Jira's (--take ${side}=jira)`,
-            });
-        }
-      }
+      if (bundles.some((bundle) => bundle.sides.includes(side))) bundledOut.push({ side, entry, remoteNow });
+      else send(side, pair.jira, await outgoingFor(context, board, read, pair, editmeta, localValue, adf, options, side, ranks), remoteNow, [entry]);
     }
     plan.fields.push(entry);
+  }
+
+  // each bundled field with a section to send is written once: the task's text for a section sent, Jira's own part for
+  // the rest, so a part nobody changed goes back as Jira holds it (Jira Sync REQ17)
+  for (const bundle of bundles) {
+    const sending = bundledOut.filter((held) => bundle.sides.includes(held.side));
+    if (sending.length === 0) continue;
+    const values = Object.fromEntries(bundle.sides.map((side) => [side, String((sending.some((held) => held.side === side) ? heldValue(task, side) : intendedValue(intendedNow, side)) ?? '')]));
+    const first = issuePairs.find((pair) => pair.eidos === bundle.sides[0])!;
+    const out = await outgoingFor(
+      context,
+      board,
+      { ...read, issue: read.whole },
+      { ...first, jira: bundle.field },
+      editmeta,
+      composeText(bundle, values, board),
+      adf,
+      options,
+      sending[0]!.side,
+      ranks,
+    );
+    send(
+      sending[0]!.side,
+      bundle.field,
+      out,
+      sending[0]!.remoteNow,
+      sending.map((held) => held.entry),
+    );
+    // every section sent is written by that one value, each with its own part's base for the guard
+    const value = outgoing.get(sending[0]!.side);
+    if (value) for (const held of sending.slice(1)) outgoing.set(held.side, { jira: bundle.field, value: value.value, remoteNow: held.remoteNow });
   }
 
   if (!options.noComments) {
@@ -723,7 +774,7 @@ export async function prepare(context: Context, task: TaskView, options: SyncOpt
     plan.comments = messages;
   }
   plan.level = plan.fields.every((field) => field.verdict === 'unchanged') && plan.comments.length === 0;
-  return { plan, task, held, read, outgoing, fromJira, pulledSides, sameSides, intendedNow, ranks, options };
+  return { plan, task, held, read, outgoing, fromJira, pulledSides, sameSides, intendedNow, ranks, options, pairs: issuePairs, bundles };
 }
 
 export function copySide(target: TaskFields, from: TaskFields, side: string): void {
@@ -783,7 +834,9 @@ export async function apply(context: Context, prepared: Prepared): Promise<SyncD
   if (steps.length > 0) writeJournal(context, held.id, journal);
 
   // 1. what Jira changed, into the task; those bases and the ones already level settled now, a pushed side's left as they were
-  const pairs = fieldsFor(fieldsOf(context.connection, backlog.settings()), read.issue.fields.issuetype?.name ?? '');
+  const pairs = prepared.pairs;
+  const board = backlog.settings();
+  const seen = (issue: Issue): Issue => splitIssue(issue, prepared.bundles, board).issue;
   const digest = { ...(held.digest ?? {}) };
   const remote = { ...(held.remote ?? {}) };
   const settle = (written: TaskView, sides: string[], issue: Issue): void => {
@@ -803,7 +856,15 @@ export async function apply(context: Context, prepared: Prepared): Promise<SyncD
   // 2. the guard: Jira read again just before it is written; a pushed field it changed meanwhile stops the sync
   const guard = await client.get<Issue>(`/rest/api/3/issue/${encodeURIComponent(held.id)}`, { fields: ['updated', 'status', ...[...outgoing.values()].map((out) => out.jira)].join(',') });
   if (guard.fields.updated !== read.issue.fields.updated) {
-    const moved = [...outgoing].filter(([side, out]) => remoteOf(guard, pairs.find((pair) => pair.eidos === side)!) !== out.remoteNow).map(([side]) => side);
+    const moved = [...outgoing]
+      .filter(
+        ([side, out]) =>
+          remoteOf(
+            seen(guard),
+            pairs.find((pair) => pair.eidos === side)!,
+          ) !== out.remoteNow,
+      )
+      .map(([side]) => side);
     const statusMoved = plan.status !== null && guard.fields.status?.name !== read.issue.fields.status?.name;
     if (moved.length > 0 || statusMoved) {
       rmSync(journalFile(context.host.workspace, held.id), { force: true });
@@ -838,7 +899,9 @@ export async function apply(context: Context, prepared: Prepared): Promise<SyncD
         // a workflow's validator says what a screen did not (an assignee it requires); the sync stops, and says so, with
         // what was sent before it kept and its base left, so the next sync sees the rest still to send
         if (cause instanceof JiraError && cause.status === 400)
-          throw new SyncRefused(`Jira refused to move ${plan.key} to ${target}: ${cause.message.replace(/^.*answered 400: /, '')}${done.to_jira.length > 0 ? ` (${done.to_jira.join(', ')} already sent)` : ''}`);
+          throw new SyncRefused(
+            `Jira refused to move ${plan.key} to ${target}: ${cause.message.replace(/^.*answered 400: /, '')}${done.to_jira.length > 0 ? ` (${done.to_jira.join(', ')} already sent)` : ''}`,
+          );
         throw cause;
       }
     }
@@ -851,8 +914,7 @@ export async function apply(context: Context, prepared: Prepared): Promise<SyncD
   }
 
   // 4. read back: a side Jira now holds as the task has it is settled; one it kept otherwise is said, its base left
-  const after = await readIssue(context, held.id, pairs);
-  const board = backlog.settings();
+  const after = seen(await readIssue(context, held.id, pairs));
   const people = peopleFor(context, false);
   const adf = adfFor(context, after, written, people);
   const carried = new Set(backlog.tasks().flatMap((other) => (heldOf(other) ? [heldOf(other)!.id] : [])));

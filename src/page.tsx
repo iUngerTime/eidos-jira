@@ -1531,12 +1531,18 @@ function Fields(props: { model: Model; chosen: Choice; setChosen: (next: Choice)
   const [making, setMaking] = useState<{ field: EditorField; name: string; type: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const shown = model.types.find((each) => each.name === type);
-  const placeOf = (typeName: string, jira: string): string => chosen.fields.find((pair) => pair.type === typeName && pair.jira === jira)?.eidos ?? '';
-  const setPlace = (jira: string, eidos: string): void => {
+  // every place a field goes for a type, in order: the first is where it maps, the rest the sections bundled into it (Jira REQ21)
+  const placesOf = (typeName: string, jira: string): string[] => chosen.fields.filter((pair) => pair.type === typeName && pair.jira === jira).map((pair) => pair.eidos);
+  const placeOf = (typeName: string, jira: string): string => placesOf(typeName, jira)[0] ?? '';
+  const setPlaces = (jira: string, places: (held: string[]) => string[]): void => {
     const over = together ? model.types.filter((each) => each.fields.some((field) => field.id === jira)).map((each) => each.name) : [type];
     const rest = chosen.fields.filter((pair) => !(pair.jira === jira && over.includes(pair.type)));
-    props.setChosen({ ...chosen, fields: eidos ? [...rest, ...over.map((each) => ({ type: each, jira, eidos }))] : rest });
+    const next = over.flatMap((each) => [...new Set(places(placesOf(each, jira)))].filter(Boolean).map((eidos) => ({ type: each, jira, eidos })));
+    props.setChosen({ ...chosen, fields: [...rest, ...next] });
   };
+  // the field mapped elsewhere keeps the sections bundled into it while it goes to a section; anywhere else it goes alone
+  const setPlace = (jira: string, eidos: string): void =>
+    setPlaces(jira, (held) => (eidos === '' ? [] : eidos.startsWith('section:') ? [eidos, ...held.slice(1).filter((each) => each !== eidos)] : [eidos]));
   const differs = (jira: string): boolean => new Set(model.types.filter((each) => each.fields.some((field) => field.id === jira)).map((each) => placeOf(each.name, jira))).size > 1;
   const create = async (): Promise<void> => {
     if (!making) return;
@@ -1614,6 +1620,48 @@ function Fields(props: { model: Model; chosen: Choice; setChosen: (next: Choice)
               </Row>
             }
           />,
+          field.kind === 'doc' && placeOf(type, field.id).startsWith('section:') ? (
+            <SettingRow
+              key={`${field.id}:bundle`}
+              stacked
+              label={t('bundleLabel', { field: field.name })}
+              hint={t('bundleHint')}
+              data-testid={`jira-bundle-${field.id}`}
+              control={
+                <Row wrap>
+                  {placesOf(type, field.id)
+                    .slice(1)
+                    .map((eidos) => (
+                      <Row key={eidos}>
+                        <Badge>{targetLabel(t, eidos)}</Badge>
+                        <Button size="sm" variant="quiet" onClick={() => setPlaces(field.id, (held) => held.filter((each) => each !== eidos))}>
+                          {t('bundleRemove')}
+                        </Button>
+                      </Row>
+                    ))}
+                  {field.targets.some((target) => target.startsWith('section:') && !placesOf(type, field.id).includes(target)) && (
+                    <Select
+                      aria-label={t('bundleAdd')}
+                      value=""
+                      onChange={(event: { target: HTMLSelectElement }) => {
+                        const eidos = event.target.value;
+                        if (eidos) setPlaces(field.id, (held) => [...held, eidos]);
+                      }}
+                    >
+                      <option value="">{t('bundleAdd')}</option>
+                      {field.targets
+                        .filter((target) => target.startsWith('section:') && !placesOf(type, field.id).includes(target))
+                        .map((target) => (
+                          <option key={target} value={target}>
+                            {targetLabel(t, target)}
+                          </option>
+                        ))}
+                    </Select>
+                  )}
+                </Row>
+              }
+            />
+          ) : null,
           making?.field.id === field.id ? (
             <SettingRow
               key={`${field.id}:new`}

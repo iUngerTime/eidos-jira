@@ -183,8 +183,13 @@ function carries(kind: Kind, eidos: string, board: BoardSettings): string | null
       return want(['parent'], 'the parent');
     case 'dependencies':
       return 'dependencies are retired for links; map Jira links with link_types';
-    case 'section':
+    case 'section': {
+      const section = [...board.sections, ...board.types.flatMap((type) => type.sections)].find((held) => held.key === name);
+      if (section?.type === 'links') return `the section ${name} holds links, which no Jira field is carried into`;
+      // a checklist goes to Jira as a task list, which only a rich-text field holds (Jira REQ21)
+      if (section?.type === 'checklist') return want(['doc'], `the checklist section ${name}`);
       return want(['text', 'doc'], `the section ${name}`);
+    }
     case 'property': {
       const property = board.properties.find((held) => same(held.name, name));
       if (!property) return null;
@@ -369,7 +374,7 @@ export interface MappingChoice {
 }
 
 function targetsOf(kind: Kind, board: BoardSettings): string[] {
-  const sections = [...new Set([...board.sections, ...board.types.flatMap((type) => type.sections)].filter((section) => section.type === 'text').map((section) => `section:${section.key}`))];
+  const sections = [...new Set([...board.sections, ...board.types.flatMap((type) => type.sections)].filter((section) => section.type !== 'links').map((section) => `section:${section.key}`))];
   const all = ['title', 'status', 'priority', 'assignee', 'milestone', 'parent', ...sections, ...board.properties.map((property) => `property:${property.name}`)];
   return all.filter((eidos) => carries(kind, eidos, board) === null);
 }
@@ -459,13 +464,11 @@ export function compactFields(chosen: Array<{ type: string; jira: string; eidos:
   for (const jira of [...new Set(chosen.map((choice) => choice.jira))]) {
     const holding = model.types.filter((type) => type.fields.some((one) => one.id === jira)).map((type) => type.name);
     const picks = chosen.filter((choice) => choice.jira === jira);
-    const places = [...new Set(picks.map((choice) => choice.eidos))];
-    const everyType = holding.every((type) => picks.some((choice) => same(choice.type, type)));
-    if (places.length === 1 && everyType) {
-      out.push({ jira, eidos: places[0]! });
-      continue;
+    // several places for one field are several sections bundled into it (Jira REQ21), each named for its types only where not every type holds it
+    for (const eidos of [...new Set(picks.map((choice) => choice.eidos))]) {
+      const types = picks.filter((choice) => choice.eidos === eidos).map((choice) => choice.type);
+      out.push(holding.every((type) => types.some((held) => same(held, type))) ? { jira, eidos } : { jira, eidos, types });
     }
-    for (const eidos of places) out.push({ jira, eidos, types: picks.filter((choice) => choice.eidos === eidos).map((choice) => choice.type) });
   }
   return out;
 }

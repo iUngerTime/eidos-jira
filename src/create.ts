@@ -12,6 +12,7 @@ import { JiraError } from './client.ts';
 import { siteKey } from './connections.ts';
 import { cachedDescription, keepDescription, readDescription, type Description, type JiraField, type JiraType } from './describe.ts';
 import { fieldsFor, fieldsOf, syncOf, typeFor } from './mapping.ts';
+import { bundlesOf, composeText, partPairs, splitIssue } from './bundle.ts';
 import { heldOf, heldValue, intendFields, intendedValue, jqlMoment, moment, normalise, peopleFor, prioritiesOf, remoteOf, short, skipOf, type Context, type Held, type Issue } from './pull.ts';
 import { accountFor, copySide, priorityOut, SyncRefused, valueOut, type Blocker, type EditField } from './sync.ts';
 import type { TaskFields, TaskView } from './types.ts';
@@ -158,12 +159,17 @@ export async function prepareCreate(context: Context, task: TaskView, options: C
   const onScreen = new Map(type.fields.map((field) => [field.id, field]));
   const ranks = await prioritiesOf(context);
   const adf: AdfContext = { mention: () => null, media: () => null };
-  for (const pair of fieldsFor(fieldsOf(connection, board), type.name)) {
+  const typePairs = fieldsFor(fieldsOf(connection, board), type.name);
+  // a field several sections are mapped to is written once, composed from them all (Jira REQ21)
+  const bundles = bundlesOf(typePairs);
+  for (const pair of typePairs) {
     const [head] = pair.eidos.split(':');
+    const bundle = bundles.find((held) => held.field === pair.jira);
+    if (bundle && bundle.sides[0] !== pair.eidos) continue;
     if (syncOf(pair) === 'pull' || head === 'status' || head === 'type' || head === 'milestone') continue;
     if (head === 'parent') continue;
     const field = onScreen.get(pair.jira);
-    const value = heldValue(task, pair.eidos);
+    const value = bundle ? composeText(bundle, Object.fromEntries(bundle.sides.map((side) => [side, String(heldValue(task, side) ?? '')])), board) : heldValue(task, pair.eidos);
     if (normalise(value) === null) continue;
     if (!field) {
       plan.later.push(pair.eidos);
@@ -174,7 +180,8 @@ export async function prepareCreate(context: Context, task: TaskView, options: C
     if (head === 'priority') out = priorityOut(context, board, edit, null, (value as string | null) ?? null, pair.eidos, ranks);
     else if (head === 'assignee') {
       const people = Array.isArray(value) ? (value as string[]) : [];
-      if (people.length > 1) out = { blocker: { side: pair.eidos, code: 'value' as const, message: `a Jira issue has one assignee; the task has ${people.join(', ')}`, fix: 'keep one assignee on the task' } };
+      if (people.length > 1)
+        out = { blocker: { side: pair.eidos, code: 'value' as const, message: `a Jira issue has one assignee; the task has ${people.join(', ')}`, fix: 'keep one assignee on the task' } };
       else {
         const found = await accountFor(context, { project: connection.project }, people[0]!, pair.eidos);
         out = found.blocker ? { blocker: found.blocker } : { value: { accountId: found.accountId } };
@@ -193,7 +200,12 @@ export async function prepareCreate(context: Context, task: TaskView, options: C
   }
   // the parent: a subtask's issue goes under its parent's
   if (parentTask && !parentHeld && !parentComing)
-    plan.blockers.push({ side: 'parent', code: 'unmapped', message: `its parent ${parentTask.id ?? parentTask.name} has no Jira issue yet`, fix: `create ${parentTask.id ?? parentTask.name} first, or in the same run` });
+    plan.blockers.push({
+      side: 'parent',
+      code: 'unmapped',
+      message: `its parent ${parentTask.id ?? parentTask.name} has no Jira issue yet`,
+      fix: `create ${parentTask.id ?? parentTask.name} first, or in the same run`,
+    });
   if (parentHeld && onScreen.has('parent')) {
     fields['parent'] = { id: parentHeld.id };
     plan.parent = parentHeld.key;
@@ -203,7 +215,8 @@ export async function prepareCreate(context: Context, task: TaskView, options: C
   for (const [key, raw] of Object.entries(given)) {
     const field = type.fields.find((held) => held.id === key || same(held.name, key));
     if (!field) {
-      if (options.fields && key in options.fields) plan.blockers.push({ side: null, code: 'value', message: `${type.name} has no field ${key} on its create screen`, fix: `eidos jira describe ${connection.name} lists its fields` });
+      if (options.fields && key in options.fields)
+        plan.blockers.push({ side: null, code: 'value', message: `${type.name} has no field ${key} on its create screen`, fix: `eidos jira describe ${connection.name} lists its fields` });
       continue;
     }
     if (fields[field.id] !== undefined) continue;
@@ -218,7 +231,13 @@ export async function prepareCreate(context: Context, task: TaskView, options: C
     if (!field.required || field.defaulted || fields[field.id] !== undefined) continue;
     if (['project', 'issuetype', 'summary', 'reporter'].includes(field.id)) continue;
     if (field.id === 'parent') {
-      if (!parentTask) plan.blockers.push({ side: 'parent', code: 'required', message: `a ${type.name} sits under a parent issue, and the task has no parent`, fix: 'give the task a parent, or --type a type that stands on its own' });
+      if (!parentTask)
+        plan.blockers.push({
+          side: 'parent',
+          code: 'required',
+          message: `a ${type.name} sits under a parent issue, and the task has no parent`,
+          fix: 'give the task a parent, or --type a type that stands on its own',
+        });
       continue;
     }
     plan.blockers.push({
@@ -258,7 +277,8 @@ export async function create(context: Context, prepared: PreparedCreate, options
       return create(context, fresh, { ...options, again: false });
     }
   } else {
-    if (!prepared.payload || prepared.plan.blockers.length > 0) throw new SyncRefused(`${name} is not created: ${prepared.plan.blockers.length} thing${prepared.plan.blockers.length === 1 ? '' : 's'} to settle first`);
+    if (!prepared.payload || prepared.plan.blockers.length > 0)
+      throw new SyncRefused(`${name} is not created: ${prepared.plan.blockers.length} thing${prepared.plan.blockers.length === 1 ? '' : 's'} to settle first`);
     const mark: Pending = { site: siteKey(connection.site), connection: connection.name, pending: randomUUID(), since: new Date().toISOString() };
     backlog.set(name, { tool: { jira: { ...mark } } });
     try {
@@ -306,10 +326,13 @@ async function link(context: Context, task: TaskView, ref: { id: string; key: st
   const { backlog, connection } = context;
   const name = task.id ?? task.name;
   const board = backlog.settings();
-  const issue = await context.client.get<Issue>(`/rest/api/3/issue/${ref.id}`, {
+  const whole = await context.client.get<Issue>(`/rest/api/3/issue/${ref.id}`, {
     fields: [...new Set(['summary', 'description', 'status', 'priority', 'assignee', 'parent', 'issuetype', 'updated', 'created', ...fieldsOf(connection, board).map((pair) => pair.jira)])].join(','),
   });
-  const pairs = fieldsFor(fieldsOf(connection, board), issue.fields.issuetype?.name ?? '');
+  const typePairs = fieldsFor(fieldsOf(connection, board), whole.fields.issuetype?.name ?? '');
+  const bundles = bundlesOf(typePairs);
+  const pairs = partPairs(typePairs, bundles);
+  const issue = splitIssue(whole, bundles, board).issue;
   const people = peopleFor(context, false);
   const carried = new Set(backlog.tasks().flatMap((other) => (heldOf(other) ? [heldOf(other)!.id] : [])));
   const intended = intendFields(connection, board, issue, task.type, pairs, people, { mention: () => null, media: () => null }, carried, await prioritiesOf(context)).fields;

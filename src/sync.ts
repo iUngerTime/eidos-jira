@@ -33,6 +33,7 @@ import {
   rawOf,
   remoteOf,
   short,
+  skipOf,
   type Context,
   type Held,
   type Issue,
@@ -579,6 +580,7 @@ export function taskFor(backlog: BacklogApi, ref: string): TaskView {
 
 export async function prepare(context: Context, task: TaskView, options: SyncOptions = {}): Promise<Prepared> {
   const { connection, backlog } = context;
+  if (skipOf(task)) throw new SyncRefused(`${task.id ?? task.name} is marked Don't sync; eidos jira skip ${task.id ?? task.name} --off syncs it again`);
   const held = heldOf(task);
   if (!held) throw new SyncRefused(`${task.id ?? task.name} holds no Jira issue; eidos jira create makes one from it`);
   if (siteKey(held.site) !== siteKey(connection.site)) throw new SyncRefused(`${task.id ?? task.name} holds an issue on ${held.site}, not ${connection.name}'s site`);
@@ -947,7 +949,7 @@ export function editedHere(context: Pick<Context, 'backlog' | 'connection'>): Ar
   const out: Array<{ task: string; key: string; sides: string[] }> = [];
   for (const task of context.backlog.tasks()) {
     const held = heldOf(task);
-    if (!held || siteKey(held.site) !== site || held.gone) continue;
+    if (!held || siteKey(held.site) !== site || held.gone || skipOf(task)) continue;
     const sides = Object.entries(held.digest ?? {})
       .filter(([side]) => side !== 'type' && side !== 'parent' && pairs.some((pair) => pair.eidos === side))
       .filter(([side, base]) => short(normalise(heldValue(task, side))) !== base)

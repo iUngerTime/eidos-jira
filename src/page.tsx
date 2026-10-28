@@ -154,6 +154,7 @@ interface TaskLink {
   url: string | null;
   connection: string | null;
   pending: boolean;
+  skipped: boolean;
 }
 // what the plugin's `create-plan` route answers (its CreatePlan), and what a create settles
 interface CreatePlanView {
@@ -238,8 +239,9 @@ function useJiraState(): { state: State | null; setState: (next: State) => void;
     host.current.get<State>('state').then(setState, (cause) => host.current.toast(host.current.t('loadFailed'), 'error', reason(cause)));
   }, [host]);
   useEffect(reload, [reload]);
-  // a fetch the app's server ran on its own (auto_fetch) reaches the page as this event
+  // a fetch the app's server ran on its own (auto_fetch) reaches the page as this event, a sync, create, or skip as the next
   usePluginEvent('fetched', reload);
+  usePluginEvent('changed', reload);
   return { state, setState, reload };
 }
 
@@ -252,8 +254,6 @@ function JiraView(): JSX.Element {
   const { busy, act } = useActions(host);
   const [found, setFound] = useState<Record<string, number>>({});
   const [reviewing, setReviewing] = useState<string | null>(null);
-  const [creating, setCreating] = useState<TaskLink | null>(null);
-  const link = useTaskLink(state);
   const fetchOne = (name: string): Promise<void> =>
     act(
       `fetch:${name}`,
@@ -299,46 +299,6 @@ function JiraView(): JSX.Element {
   else
     body = (
       <Stack gap="md" pad="sm">
-        {link ? (
-          <Card data-testid="jira-this-task">
-            <Stack gap="xs">
-              <Text size="xs" tone="muted" block>
-                {t('thisTask')}
-              </Text>
-              <Text weight="strong" block>
-                {link.title}
-              </Text>
-              <Text size="sm" tone="muted" block>
-                {link.key ? t('inJiraAs', { key: link.key }) : link.pending ? t('createCutShort') : t('notInJira')}
-              </Text>
-              {link.key && !link.connection && (
-                <Text size="xs" tone="error" block>
-                  {t('noBoardReaches')}
-                </Text>
-              )}
-              <Row>
-                {link.key ? (
-                  <>
-                    <Button size="sm" variant="primary" disabled={busy !== null || !link.connection} onClick={() => setReviewing(link.task)} data-testid="jira-sync-task">
-                      {t('syncWithJira')}
-                    </Button>
-                    <Button size="sm" variant="quiet" onClick={() => window.open(link.url!, '_blank', 'noopener')}>
-                      {t('openInJira')}
-                    </Button>
-                  </>
-                ) : (
-                  <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => setCreating(link)} data-testid="jira-create-task">
-                    {t(link.pending ? 'finishCreate' : 'createInJira')}
-                  </Button>
-                )}
-              </Row>
-            </Stack>
-          </Card>
-        ) : (
-          <Text size="xs" tone="faint" block>
-            {t('openTaskHint')}
-          </Text>
-        )}
         {state.connections.map((connection) => {
           const lastFetch = connection.status?.last_fetch;
           const waiting = found[connection.name] ?? (lastFetch && !lastFetch.error ? lastFetch.count : null);
@@ -412,17 +372,6 @@ function JiraView(): JSX.Element {
           onClose={() => setReviewing(null)}
           onSynced={() => {
             setReviewing(null);
-            reload();
-          }}
-        />
-      )}
-      {creating && state && (
-        <CreateReview
-          link={creating}
-          connections={state.connections.map((connection) => connection.name)}
-          onClose={() => setCreating(null)}
-          onCreated={() => {
-            setCreating(null);
             reload();
           }}
         />
@@ -645,8 +594,8 @@ function BlockerAsk(props: { ask: Ask; onChoose: (value: string) => void }): JSX
   );
 }
 
-// The task the open file holds, as the sidebar offers it to sync or to create, read again whenever the plugin's state is.
-function useTaskLink(state: State | null): TaskLink | null {
+// The task the open file holds, as the ticket panel offers it to sync or to create, read again whenever `again` changes.
+function useTaskLink(again: unknown): TaskLink | null {
   const host = useHostRef(usePluginHost());
   const open = useOpen() as { file?: string };
   const file = open.file ?? null;
@@ -668,8 +617,195 @@ function useTaskLink(state: State | null): TaskLink | null {
     return () => {
       live = false;
     };
-  }, [host, file, state]);
+  }, [host, file, again]);
   return link;
+}
+
+// ---- the ticket panel -------------------------------------------------------------------
+
+// The open ticket's own standing with Jira, in the auxiliary sidebar beside it: whether it is in Jira, what a sync would
+// carry each way, and its Sync, Create, and Don't sync, one ticket at a time.
+function TicketView(): JSX.Element {
+  const host = usePluginHost();
+  const hostRef = useHostRef(host);
+  const { t } = host;
+  const { busy, act } = useActions(host);
+  const [round, setRound] = useState(0);
+  const again = (): void => setRound((held) => held + 1);
+  const link = useTaskLink(round);
+  const [connections, setConnections] = useState<string[]>([]);
+  const [plan, setPlan] = useState<SyncPlanView | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [reviewing, setReviewing] = useState(false);
+  const [creating, setCreating] = useState(false);
+  usePluginEvent('fetched', again);
+  usePluginEvent('changed', again);
+  useEffect(() => {
+    hostRef.current.get<State>('state').then(
+      (state) => setConnections(state.connections.map((connection) => connection.name)),
+      () => setConnections([]),
+    );
+  }, [hostRef, round]);
+  // what a sync would do, read from Jira as the ticket opens: a read, nothing sent
+  const syncable = link?.key && link.connection && !link.skipped ? link.task : null;
+  useEffect(() => {
+    setPlan(null);
+    setPlanError(null);
+    if (!syncable) return;
+    let live = true;
+    hostRef.current.post<SyncPlanView>('sync-plan', { task: syncable, options: { take: {}, accept_loss: [], fields: {} } }).then(
+      (next) => {
+        if (live) setPlan(next);
+      },
+      (cause) => {
+        if (live) setPlanError(reason(cause));
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [hostRef, syncable, round]);
+  if (!link)
+    return (
+      <Stack pad="sm">
+        <Text size="sm" tone="faint" block>
+          {t('openTaskHint')}
+        </Text>
+      </Stack>
+    );
+  const arrow: Record<SyncPlanView['fields'][number]['verdict'], string> = { unchanged: '', 'from-jira': '←', 'to-jira': '→', same: '=', conflict: '!' };
+  const moving = plan?.fields.filter((field) => field.verdict !== 'unchanged' && field.verdict !== 'same') ?? [];
+  let standing: JSX.Element | null = null;
+  if (link.skipped)
+    standing = (
+      <Text size="sm" tone="muted" block>
+        {t('skippedHere')}
+      </Text>
+    );
+  else if (!link.key)
+    standing = (
+      <Text size="sm" tone="muted" block>
+        {link.pending ? t('createCutShort') : t('notInJira')}
+      </Text>
+    );
+  else if (!link.connection)
+    standing = (
+      <Text size="sm" tone="error" block>
+        {t('noBoardReaches')}
+      </Text>
+    );
+  else if (planError)
+    standing = (
+      <Text size="sm" tone="error" block>
+        {planError}
+      </Text>
+    );
+  else if (!plan)
+    standing = (
+      <Stack>
+        <SkeletonBar width="70%" />
+        <SkeletonBar width="50%" />
+      </Stack>
+    );
+  else if (moving.length === 0)
+    standing = (
+      <Text size="sm" tone="muted" block>
+        {t('levelHere')}
+      </Text>
+    );
+  else
+    standing = (
+      <Stack gap="xs" data-testid="jira-ticket-fields">
+        {moving.map((field) => (
+          <Stack key={field.side} gap="xs">
+            <Row>
+              <Text weight="strong">{arrow[field.verdict]}</Text>
+              <Text size="sm" grow>
+                {field.side}
+              </Text>
+            </Row>
+            <Text size="xs" tone="faint" block>
+              {field.verdict === 'from-jira' && t('fromJira', { value: field.remote })}
+              {field.verdict === 'to-jira' && (field.kept ? t('keptHere', { reason: field.reason ?? '' }) : t('toJira', { value: field.eidos }))}
+              {field.verdict === 'conflict' && t('bothChanged', { here: field.eidos, jira: field.remote })}
+            </Text>
+          </Stack>
+        ))}
+        {plan.blockers.length > 0 && (
+          <Text size="xs" tone="muted" block>
+            {t('toSettle', { n: plan.blockers.length })}
+          </Text>
+        )}
+      </Stack>
+    );
+  return (
+    <Stack gap="md" pad="sm" data-testid="jira-ticket">
+      <Stack gap="xs">
+        <Row>
+          <Text weight="strong" grow>
+            {link.key ?? link.task}
+          </Text>
+          {moving.length > 0 ? <Badge tone="accent">{moving.length}</Badge> : null}
+        </Row>
+        <Text size="sm" tone="muted" block>
+          {link.title}
+        </Text>
+      </Stack>
+      {standing}
+      {!link.skipped && (
+        <Row>
+          {link.key ? (
+            <>
+              <Button size="sm" variant="primary" disabled={busy !== null || !link.connection} onClick={() => setReviewing(true)} data-testid="jira-sync-task">
+                {t('syncWithJira')}
+              </Button>
+              <Button size="sm" variant="quiet" onClick={() => window.open(link.url!, '_blank', 'noopener')}>
+                {t('openInJira')}
+              </Button>
+            </>
+          ) : (
+            <Button size="sm" variant="primary" disabled={busy !== null || connections.length === 0} onClick={() => setCreating(true)} data-testid="jira-create-task">
+              {t(link.pending ? 'finishCreate' : 'createInJira')}
+            </Button>
+          )}
+        </Row>
+      )}
+      <SettingRow
+        label={t('dontSync')}
+        hint={t(link.skipped ? 'dontSyncOn' : 'dontSyncOff')}
+        control={
+          <Switch
+            checked={link.skipped}
+            disabled={busy !== null || link.pending}
+            aria-label={t('dontSync')}
+            onChange={(event: { currentTarget: HTMLInputElement }) => void act('skip', () => host.post('skip', { task: link.task, on: event.currentTarget.checked }), again)}
+            data-testid="jira-dont-sync"
+          />
+        }
+      />
+      {reviewing && (
+        <SyncReview
+          task={link.task}
+          onClose={() => setReviewing(false)}
+          onSynced={() => {
+            setReviewing(false);
+            again();
+          }}
+        />
+      )}
+      {creating && (
+        <CreateReview
+          link={link}
+          connections={connections}
+          onClose={() => setCreating(false)}
+          onCreated={() => {
+            setCreating(false);
+            again();
+          }}
+        />
+      )}
+    </Stack>
+  );
 }
 
 // ---- the create review ------------------------------------------------------------------
@@ -1467,7 +1603,18 @@ function Options(props: { state: State; act: Act; take: (answer: { state: State 
 export const page: PagePlugin = {
   name: 'jira',
   strings: JIRA_STRINGS,
-  views: [{ sector: 'primary', name: 'boards', title: 'Jira', icon: JiraIcon, render: () => <JiraView /> }],
+  views: [
+    { sector: 'primary', name: 'boards', title: 'Jira', icon: JiraIcon, render: () => <JiraView /> },
+    // the open ticket's own panel, beside a task the Backlog shows
+    {
+      sector: 'auxiliary',
+      name: 'ticket',
+      title: 'Jira',
+      icon: JiraIcon,
+      render: () => <TicketView />,
+      when: (open: { kind: string; plugin?: string }) => open.kind === 'page' && open.plugin === 'backlog',
+    },
+  ],
   pages: [{ path: 'mapping', render: (route: { segments: string[] }) => <MappingPage key={route.segments[0] ?? ''} name={decodeURIComponent(route.segments[0] ?? '')} /> }],
   settings: () => <JiraSettings />,
   settingsDrawn: ['connections', 'accounts', 'pull_attachments', 'add_people', 'auto_fetch'],

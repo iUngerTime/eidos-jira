@@ -96,6 +96,8 @@ export interface Plan {
   owned: Array<{ key: string; task: string; fields: string[] }>;
   // issues a cut-short create made, left for that task's next create to link
   waiting: Array<{ key: string; task: string }>;
+  // issues whose task is marked Don't sync, left as the root has them
+  skipped: Array<{ key: string; task: string }>;
   comments: { add: number; change: number; remove: number };
   // the people a pull adds to the root's users, with `add_people` on
   people: string[];
@@ -304,6 +306,9 @@ export function heldValue(task: TaskView, eidos: string): unknown {
   }
 }
 
+// A task marked Don't sync stays the root's own: no pull writes it, no sync or create sends it, wherever its issue is.
+export const skipOf = (task: TaskView): boolean => (task.properties['jira'] as { skip?: unknown } | null | undefined)?.skip === true;
+
 export const heldOf = (task: TaskView): Held | null => {
   const value = task.properties['jira'];
   if (typeof value !== 'object' || value === null) return null;
@@ -443,6 +448,7 @@ export async function run(context: Context, write: boolean, options: PullOptions
     local: [],
     owned: [],
     waiting: [],
+    skipped: [],
     comments: { add: 0, change: 0, remove: 0 },
     people: [],
     gone: [],
@@ -477,6 +483,10 @@ export async function run(context: Context, write: boolean, options: PullOptions
       continue;
     }
     const task = held.get(issue.id) ?? null;
+    if (task && skipOf(task)) {
+      plan.skipped.push({ key: issue.key, task: task.id ?? task.name });
+      continue;
+    }
     const was = task ? heldOf(task) : null;
     const updated = moment(issue.fields.updated);
     if (task && was && !options.full && was.updated === updated && was.gone === undefined) {
@@ -540,7 +550,7 @@ export async function run(context: Context, write: boolean, options: PullOptions
   // REQ11: an issue gone from the scope leaves its task where it is, marked
   for (const [id, task] of held) {
     const was = heldOf(task)!;
-    if (inScope.has(id)) continue;
+    if (inScope.has(id) || skipOf(task)) continue;
     if (projectOf(was.key) !== connection.project && !connection.jql && connection.board === undefined) continue;
     if (was.gone === undefined) plan.gone.push({ key: was.key, task: task.id ?? task.name });
   }

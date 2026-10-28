@@ -30,7 +30,7 @@ import { cachedDescription, keepDescription, readDescription, type Description }
 import { checkMapping, compactFields, draftMapping, editorModel, type DraftEntry, type EditorModel, type MappingChoice, type MappingProblem, PARENT_RULES } from './mapping.ts';
 import { ask, confirm, readLines } from './prompt.ts';
 import { create as createIssue, parentsFirst, prepareCreate, type CreateOptions, type CreatePlan, type Created } from './create.ts';
-import { heldOf, readState, run, writeState, type Done, type Plan } from './pull.ts';
+import { heldOf, readState, run, skipOf, writeState, type Done, type Plan } from './pull.ts';
 import { apply as applySync, editedHere, journalOf, prepare as prepareSync, sendComment, SyncRefused, taskFor, type SyncDone, type SyncOptions, type SyncPlan } from './sync.ts';
 import { tokensFile } from './tokens.ts';
 import type { AssetsApi, BacklogApi, CommentsApi, TaskView } from './types.ts';
@@ -79,6 +79,8 @@ export interface JiraApi {
   create(tasks: string[], connection: string, options?: CreateOptions): Promise<Created[]>;
   // the task a file of the root holds, as the page shows it: the issue it is linked to, the create it waits on, or neither
   taskAt(file: string): TaskLink | null;
+  // marks a task Don't sync, or clears the mark: a marked task is the root's own, never pulled over nor sent
+  skip(task: string, on: boolean): void;
 }
 
 export interface TaskLink {
@@ -89,6 +91,7 @@ export interface TaskLink {
   // the connection it syncs through, or its cut-short create was made on; null when no connection here reaches it
   connection: string | null;
   pending: boolean;
+  skipped: boolean;
 }
 
 export interface SyncStatus {
@@ -235,6 +238,7 @@ function describePlan(plan: Plan): string {
   lines.push(`${plan.connection}: ${nothing ? 'nothing to pull' : head.join(', ')}${plan.since ? ` (changed since ${plan.since})` : ' (the whole scope)'}`);
   for (const add of plan.add) lines.push(`  + ${add.key}  ${add.title} (${add.type})`);
   for (const change of plan.change) lines.push(`  ~ ${change.key}  ${change.task}${change.fields.length > 0 ? `: ${change.fields.join(', ')}` : ''}`);
+  for (const skipped of plan.skipped ?? []) lines.push(`  ⊘ ${skipped.key}  ${skipped.task} is marked Don't sync; the pull leaves it`);
   for (const waiting of plan.waiting ?? []) lines.push(`  … ${waiting.key}  made by ${waiting.task}'s create, cut short; eidos jira create ${waiting.task} links it`);
   for (const owned of plan.owned ?? [])
     lines.push(`  ⇄ ${owned.key}  ${owned.task}: Jira changed ${owned.fields.join(', ')}, which this root owns; the pull leaves them (eidos jira sync ${owned.task} settles it)`);
@@ -478,7 +482,10 @@ const entry: CliEntry = {
       sync: async (ref, options = {}) => {
         const task = taskFor(backlogOf(host), ref);
         const context = await contextFor(host, connectionOfTask(host, task));
-        return applySync(context, await prepareSync(context, task, options));
+        const done = await applySync(context, await prepareSync(context, task, options));
+        // the page's two views, the boards and the open ticket, read their state again
+        host.emit('changed', { task: done.task });
+        return done;
       },
       comment: async (ref, text) => {
         const task = taskFor(backlogOf(host), ref);
@@ -526,7 +533,24 @@ const entry: CliEntry = {
             connection = null;
           }
         }
-        return { task: task.id ?? task.name, title: task.title, key: held?.key ?? null, url: held ? `https://${siteKey(held.site)}/browse/${held.key}` : null, connection, pending };
+        return {
+          task: task.id ?? task.name,
+          title: task.title,
+          key: held?.key ?? null,
+          url: held ? `https://${siteKey(held.site)}/browse/${held.key}` : null,
+          connection,
+          pending,
+          skipped: skipOf(task),
+        };
+      },
+      skip: (ref, on) => {
+        const backlog = backlogOf(host);
+        const task = taskFor(backlog, ref);
+        const held = { ...((task.properties['jira'] as Record<string, unknown> | null | undefined) ?? {}) };
+        if (on) held['skip'] = true;
+        else delete held['skip'];
+        backlog.set(task.id ?? task.name, { tool: { jira: Object.keys(held).length > 0 ? held : null } });
+        host.emit('changed', { task: task.id ?? task.name });
       },
       createPlan: async (refs, name, options = {}) => {
         const backlog = backlogOf(host);
@@ -552,6 +576,7 @@ const entry: CliEntry = {
         const out: Created[] = [];
         // each planned again as its turn comes, so a sub-task finds the issue its parent was just given
         for (const task of tasks) out.push(await createIssue(context, await prepareCreate(context, backlog.get(task.id ?? task.name), { ...options, batch }), options));
+        host.emit('changed', { tasks: out.map((created) => created.task) });
         return out;
       },
     };
@@ -924,6 +949,18 @@ const entry: CliEntry = {
           action(async (ref: string, words: string[]) => {
             const sent = await api.comment(ref, words.join(' '));
             print(`Comment sent to ${sent.key}.`);
+          }),
+        );
+
+      command
+        .command('skip')
+        .argument('<task>', 'a task by its id or its issue key')
+        .option('--off', 'clear the mark, so the task syncs again')
+        .description("mark a task Don't sync: it stays the root's own, never pulled over, synced, or created in Jira")
+        .action(
+          action(async (ref: string, options: { off?: boolean }) => {
+            api.skip(ref, !options.off);
+            print(options.off ? `${ref} syncs with Jira again.` : `${ref} is marked Don't sync.`);
           }),
         );
 

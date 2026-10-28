@@ -12,7 +12,7 @@ import { JiraError } from './client.ts';
 import { siteKey } from './connections.ts';
 import { cachedDescription, keepDescription, readDescription, type Description, type JiraField, type JiraType } from './describe.ts';
 import { fieldsFor, fieldsOf, syncOf, typeFor } from './mapping.ts';
-import { heldOf, heldValue, intendFields, intendedValue, jqlMoment, moment, normalise, peopleFor, prioritiesOf, remoteOf, short, type Context, type Held, type Issue } from './pull.ts';
+import { heldOf, heldValue, intendFields, intendedValue, jqlMoment, moment, normalise, peopleFor, prioritiesOf, remoteOf, short, skipOf, type Context, type Held, type Issue } from './pull.ts';
 import { accountFor, copySide, priorityOut, SyncRefused, valueOut, type Blocker, type EditField } from './sync.ts';
 import type { TaskFields, TaskView } from './types.ts';
 
@@ -134,6 +134,7 @@ export interface PreparedCreate {
 export async function prepareCreate(context: Context, task: TaskView, options: CreateOptions = {}): Promise<PreparedCreate> {
   const { connection, backlog } = context;
   const name = task.id ?? task.name;
+  if (skipOf(task)) throw new SyncRefused(`${name} is marked Don't sync; eidos jira skip ${name} --off lets it go to Jira`);
   const linked = heldOf(task);
   if (linked) throw new SyncRefused(`${name} already holds ${linked.key}; eidos jira sync ${name} carries its changes`);
   const pending = pendingOf(task);

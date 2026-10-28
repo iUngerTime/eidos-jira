@@ -172,6 +172,12 @@ const entry: AppEntry<JiraApi> = {
 
     // Jira Push from the page: the task the open file holds, then the plan of its create and the create itself
     host.route('GET', 'task', (request) => answer(() => ({ task: api.taskAt(request.query.get('file') ?? '') })));
+    host.route('POST', 'skip', (request) =>
+      answer(async () => {
+        api.skip(text(request.body['task']), request.body['on'] === true);
+        return { state: state(host, api) };
+      }),
+    );
     host.route('POST', 'create-plan', (request) =>
       answer(async () => (await api.createPlan([text(request.body['task'])], text(request.body['connection']), createOptions(request.body['options'])))[0]),
     );

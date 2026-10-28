@@ -297,3 +297,26 @@ test('Jira Sync REQ6: a sync leaves the next pull to read the issue, so a collea
 test('Jira Sync REQ16: a subtask under its pulled parent is level, its parent read by the issue it holds', async () => {
   assert.match(await ok(['jira', 'sync', 'T-ACME-2.1', '--dry-run']), /level: nothing to sync/);
 });
+
+test("Jira Sync: a task marked Don't sync is the root's own, never pulled over, synced, created, or listed as edited", async () => {
+  await ok(['backlog', 'set', 'T-ACME-3', '--title', 'Kept in Eidos only']);
+  assert.match(await ok(['jira', 'skip', 'T-ACME-3']), /marked Don't sync/);
+  assert.doesNotMatch(await ok(['jira', 'status', 'acme']), /T-ACME-3/);
+  touch(fake.state, 'ACME-3', { summary: 'Renamed in Jira again' }, jiraNow());
+  assert.match(await ok(['jira', 'pull', 'acme', '--dry-run']), /ACME-3 {2}T-ACME-3 is marked Don't sync; the pull leaves it/);
+  await ok(['jira', 'pull', 'acme']);
+  assert.match(readFileSync(taskFile('T-ACME-3'), 'utf8'), /title: Kept in Eidos only/);
+  const refused = await eidos(['jira', 'sync', 'T-ACME-3', '--dry-run']);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /is marked Don't sync/);
+  await ok(['backlog', 'add', 'Internal chore']);
+  const chore = (JSON.parse(await ok(['backlog', '--json'])) as { tasks: Array<{ id: string; title: string }> }).tasks.find((held) => held.title === 'Internal chore')!;
+  await ok(['jira', 'skip', chore.id]);
+  const create = await eidos(['jira', 'create', chore.id, '--connection', 'acme', '--type', 'Story', '--yes']);
+  assert.notEqual(create.status, 0);
+  assert.match(create.stderr, /is marked Don't sync/);
+  // clearing the mark hands the task back, the issue key it holds untouched
+  assert.match(await ok(['jira', 'skip', 'T-ACME-3', '--off']), /syncs with Jira again/);
+  assert.match(readFileSync(taskFile('T-ACME-3'), 'utf8'), /\n {2}key: ACME-3\n/);
+  assert.doesNotMatch(readFileSync(taskFile('T-ACME-3'), 'utf8'), /skip:/);
+});

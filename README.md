@@ -1,77 +1,76 @@
 # Jira for Eidos MD
 
-A community plugin for [Eidos MD](https://eidosmd.com) that connects a root to Jira Cloud. It pulls a board's issues into the Backlog as tasks, and each issue's comments into one Comments thread, signed by the people who wrote them. You can see what a pull would do before you run it, and you choose what each Jira field becomes on a task.
+Bring your team's Jira board into your Eidos root. Every issue becomes a task in the Backlog, every comment thread comes with it, and your sprints become milestones, so you can plan and work next to the blueprints while the board stays where your team keeps it.
 
-It runs on your machine and talks straight to your Jira site with your own Atlassian API token. There is no server in between, and nothing goes back to Jira.
+- **See it before it lands.** A fetch shows what changed in Jira since your last pull and writes nothing. A pull brings it in.
+- **Your mapping, your words.** Jira's statuses, issue types, priorities, and fields map onto your Backlog's. The plugin drafts the mapping and you accept or change each entry.
+- **Comments, signed and dated.** Each issue's comments arrive as one thread on its task, signed by the people who wrote them, dated when they wrote them, with their mentions, formatting, and screenshots.
+- **Safe to pull again.** Jira wins on the fields you map. A field you edited in Eidos is named before a pull overwrites it, and everything the mapping leaves alone (your notes, checklists, the blueprints a task serves, replies written in Eidos) is never touched.
+- **Private by design.** It runs on your machine and talks straight to your Jira site with your own API token. There is no server in between, and nothing is sent back to Jira.
 
-Status: pull only. Push (Eidos to Jira) is not built.
+Pull only for now: changes go from Jira to Eidos. Needs Eidos MD 0.16.1 or later.
 
-## Install
+## Get started
 
-From the Registry:
+1. **Install it.** In Eidos MD, open **Settings → Community plugins → Browse**, find **Jira**, and choose **Install**. Then switch it on under **Installed plugins**. It needs the Backlog and Comments plugins on.
+2. **Sign in.** Make a classic API token at [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens) (**Create API token**, not the one with scopes), then in a terminal in your root:
 
-```bash
-eidos plugin install @iUngerTime/jira
-```
+   ```bash
+   eidos jira login your-site.atlassian.net
+   ```
 
-```bash
-eidos plugin enable jira
-```
+   It asks for your Atlassian email and the token, typed hidden, and keeps the token only once Jira accepts it.
 
-```bash
-eidos plugin allow jira
-```
+3. **Connect a board.** Use the project key and the board's number from its address (`…/projects/ACME/boards/12`):
 
-`allow` means this machine trusts the plugin's code. Until you allow it, a root that switches the plugin on loads none of it. The plugin needs eidosmd 0.16.1 or later, the Backlog (`eidos plugin enable backlog`), and Comments for threads.
+   ```bash
+   eidos jira connect acme --site your-site.atlassian.net --project ACME --board 12
+   ```
 
-## Use
+4. **Map it.** `describe` reads the board, and `map` drafts the mapping and asks about each entry:
 
-```bash
-eidos jira login acme.atlassian.net
-```
+   ```bash
+   eidos jira describe acme
+   ```
 
-This asks for your Atlassian email and an [API token](https://id.atlassian.com/manage-profile/security/api-tokens). The token is typed hidden and checked against Jira, and kept only once Jira accepts it. It is kept in one file on this machine, `plugins/jira/credentials.json` in the Eidos app data folder, outside every root and readable only by you, the same on macOS, Windows, and Linux. It never goes into a root or a settings file. Add `--global` to use that sign-in in every root on this machine. In a script, set `JIRA_EMAIL` and `JIRA_API_TOKEN` instead; they come first.
+   ```bash
+   eidos jira map acme
+   ```
 
-```bash
-eidos jira connect acme --site acme.atlassian.net --project ACME --board 12
-```
+5. **Fetch, then pull.**
 
-```bash
-eidos jira describe acme
-```
+   ```bash
+   eidos jira fetch
+   ```
 
-```bash
-eidos jira map acme
-```
+   ```bash
+   eidos jira pull
+   ```
 
-`describe` reads the board's columns, the issue types with their statuses and fields, the priorities, the link types, and the sprints. `map` drafts a mapping from them by matching names and categories, and asks about each entry; only the ones you accept are written. To change one entry:
-
-```bash
-eidos jira configure:map acme set statuses "Code Review" "In Review"
-```
-
-Then fetch and pull, as with git:
-
-```bash
-eidos jira fetch
-```
-
-```bash
-eidos jira pull
-```
-
-`fetch` shows what changed in Jira since your last pull and writes nothing. `pull` brings it in. Jira wins on every field the mapping carries. If you edited one of those fields in Eidos, the fetch names it, and `pull --keep-local` leaves your edit in place. Anything the mapping does not carry, such as your notes, checklist ticks, the blueprints a task serves, and replies written in Eidos, is never touched.
-
-`eidos instructions jira` prints the full guide, with every command and its `--json` shape.
+Signing in and connecting happen in the terminal for now; a settings page in the app is coming. `eidos instructions jira` prints the full guide, every command with its `--json` output, for you or an AI agent working in the root.
 
 ## What a pull writes
 
-- Each issue becomes a task. Its id comes from the issue key (`ACME-123` becomes `T-ACME-123`), so two people pulling the same board on two branches write the same file. A Jira sub-task becomes a subtask of its parent's task, with the id the Backlog gives a subtask. The issue itself is kept in the task's frontmatter under `jira`; never edit that key.
-- An issue's comments become one thread on its task, each signed by its author and dated when Jira says it was written. Edits and deletions in Jira follow. Comments restricted to a role or a group are left out unless the connection sets `restricted_comments: true`.
-- People keep the names Jira gives them: an assignee, a comment's author, and a mention are written as the root user of the same name where the root has one, and as the Jira name otherwise. A pull adds nobody to the root's users unless you turn on `add_people` (`eidos plugin set jira add_people true`, shared by everyone in the root); then each person the root does not have is added as an ordinary user, named as Jira names them.
-- A sprint becomes a milestone of the same name, dated when it ends.
-- Attachments are linked to in Jira by default. Turn on `pull_attachments` (`eidos plugin set jira pull_attachments true`) to download them into `assets/` instead.
-- An issue that leaves the scope keeps its task, marked `jira.gone`. Nothing is ever deleted.
+- **Tasks keyed by their issue.** `ACME-123` becomes `T-ACME-123`, so two people pulling the same board on two branches write the same file. A Jira sub-task becomes a subtask of its parent's task. The issue's link lives in the task's frontmatter under `jira`; leave that key to the plugin.
+- **Comment threads.** One thread per issue, each comment signed by its author with Jira's date. Edits and deletions in Jira follow on the next pull. Comments restricted to a role or a group stay in Jira unless the connection sets `restricted_comments: true`.
+- **People.** An assignee, a comment's author, or a mention is written as the root user of the same name where your root has one, and as their Jira name otherwise.
+- **Sprints as milestones**, dated when the sprint ends.
+- **Attachments** are links to Jira, or downloaded into `assets/` when you turn on `pull_attachments`. A downloaded image shows in place.
+- **Nothing is deleted.** An issue that leaves the board keeps its task, marked as gone, and comes back if it returns.
+
+## Settings
+
+| Setting            | Where                | What it does                                                                                    |
+| ------------------ | -------------------- | ----------------------------------------------------------------------------------------------- |
+| `pull_attachments` | shared with the root | Download each issue's attachments into `assets/` instead of linking to Jira.                    |
+| `add_people`       | shared with the root | Add each person a pull finds that the root doesn't have to its users.                           |
+| `auto_fetch`       | yours                | Fetch every 5, 15, 30, or 60 minutes while the app has the root open. Nothing pulls on its own. |
+
+Set one with `eidos plugin set jira <setting> <value>`.
+
+## Your token
+
+Your API token is kept in one file on your machine, `plugins/jira/credentials.json` in the Eidos app data folder, readable only by you. It never goes into a root, a settings file, a log, or a commit. In a script, set `JIRA_EMAIL` and `JIRA_API_TOKEN` instead. `eidos jira logout <site>` removes it.
 
 ## Develop
 
@@ -80,20 +79,10 @@ pnpm install
 ```
 
 ```bash
-pnpm build
-```
-
-The build writes `dist/manifest.yaml`, `dist/cli.js`, and `dist/instructions.md`, the release files. `cli.js` is a CommonJS bundle whose only import from the CLI is `require('eidosmd/plugin')`, which the host answers.
-
-The tests run the real Eidos CLI against a fake Jira server (`test/fake-jira.ts`) in a scratch root, with the credentials file in a scratch app data folder. No live Jira and no real token are used. They run the `eidosmd` the repo installs from npm:
-
-```bash
 pnpm test
 ```
 
-To test against a CLI built from source instead, point `EIDOS_CLI` at its `dist/src/cli.js` (`EIDOS_CLI=../eidosmd/cli/dist/src/cli.js pnpm test`).
-
-To try it by hand, start the fake server (`node --experimental-strip-types test/fake-jira.ts`), install the build into an app data folder of your own with `EIDOS_APP_DATA=/tmp/eidos-try/app pnpm install-local`, and use that same `EIDOS_APP_DATA` in a scratch root.
+The build writes the release files to `dist/` (`manifest.yaml`, which carries the guide too, `cli.js`, and `instructions.md`). The tests run the real Eidos CLI against a fake Jira server (`test/fake-jira.ts`) in a scratch root, never a live Jira. To test against a CLI built from source, point `EIDOS_CLI` at its `dist/src/cli.js`. A trial against a real site belongs in `trial/`, which git ignores.
 
 ## License
 

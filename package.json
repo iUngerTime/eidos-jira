@@ -1,6 +1,6 @@
 {
   "name": "@iungertime/jira",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Jira Cloud for Eidos MD: pull a board's issues into the Backlog as tasks, and their comments as threads signed by the people who wrote them.",
   "license": "MIT",

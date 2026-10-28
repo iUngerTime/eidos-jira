@@ -59,6 +59,8 @@ export interface FieldPlan {
   reason?: string;
   // a field changed here that is kept in the root and named, not sent (a read-only field, one off the edit screen)
   kept?: boolean;
+  // a section's two values whole, for the review to set side by side line by line
+  text?: { eidos: string; remote: string };
 }
 
 export interface Blocker {
@@ -644,6 +646,7 @@ export async function prepare(context: Context, task: TaskView, options: SyncOpt
     const changedThere = recorded ? remoteNow !== remoteBase : base === undefined ? local !== mapped : mapped !== base;
     const owner = syncOf(pair);
     const entry: FieldPlan = { side, jira: pair.jira, verdict: 'unchanged', eidos: shown(localValue), remote: shown(remoteValue), seen: remoteNow };
+    if (side.startsWith('section:')) entry.text = { eidos: String(localValue ?? '').trim(), remote: String(remoteValue ?? '').trim() };
     let verdict: Verdict;
     if (!changedHere && !changedThere) verdict = 'unchanged';
     else if (local === mapped) verdict = 'same';

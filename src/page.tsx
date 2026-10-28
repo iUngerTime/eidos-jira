@@ -32,6 +32,7 @@ import {
   Stack,
   Switch,
   Text,
+  useFileChanges,
   useOpen,
   usePluginEvent,
   usePluginHost,
@@ -126,7 +127,17 @@ interface SyncPlanView {
   task: string;
   key: string;
   url: string;
-  fields: Array<{ side: string; jira: string; verdict: 'unchanged' | 'from-jira' | 'to-jira' | 'same' | 'conflict'; eidos: string; remote: string; seen: string; reason?: string; kept?: boolean }>;
+  fields: Array<{
+    side: string;
+    jira: string;
+    verdict: 'unchanged' | 'from-jira' | 'to-jira' | 'same' | 'conflict';
+    eidos: string;
+    remote: string;
+    seen: string;
+    reason?: string;
+    kept?: boolean;
+    text?: { eidos: string; remote: string };
+  }>;
   status: { from: string; to: string; path: string[] } | null;
   comments: Array<{ index: number; text: string }>;
   blockers: Blocker[];
@@ -191,6 +202,65 @@ const PROPERTY_TYPES = ['Text', 'List', 'Number', 'Checkbox', 'Date', 'Date & ti
 const reason = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause));
 const mappedCount = (connection: ConnectionRow): number => PARTS.reduce((sum, part) => sum + (Array.isArray(connection.mapping[part]) ? (connection.mapping[part] as Pair[]).length : 0), 0);
 const planCount = (plan: Plan): number => plan.add.length + plan.change.length + plan.gone.length;
+// A field as a person names it: section:description is Description, property:story-points is Story points.
+const sideName = (side: string): string => {
+  const bare = side.replace(/^(section|property):/, '').replace(/[-_]/g, ' ');
+  return bare.charAt(0).toUpperCase() + bare.slice(1);
+};
+
+// Which lines of each text the two hold in common, in order (their longest common run of lines), so the rest is what one side alone says.
+function sharedLines(left: string[], right: string[]): { left: boolean[]; right: boolean[] } {
+  const longest: number[][] = Array.from({ length: left.length + 1 }, () => new Array<number>(right.length + 1).fill(0));
+  for (let i = left.length - 1; i >= 0; i -= 1)
+    for (let j = right.length - 1; j >= 0; j -= 1) longest[i]![j] = left[i] === right[j] ? longest[i + 1]![j + 1]! + 1 : Math.max(longest[i + 1]![j]!, longest[i]![j + 1]!);
+  const out = { left: left.map(() => false), right: right.map(() => false) };
+  let i = 0;
+  let j = 0;
+  while (i < left.length && j < right.length) {
+    if (left[i] === right[j]) {
+      out.left[i] = true;
+      out.right[j] = true;
+      i += 1;
+      j += 1;
+    } else if (longest[i + 1]![j]! >= longest[i]![j + 1]!) i += 1;
+    else j += 1;
+  }
+  return out;
+}
+
+// A text field's two sides whole, Jira's then this task's: the lines both hold muted, and those only one side holds marked
+// with − (Jira's alone) or + (here alone), so what each side says is read, not guessed at.
+function TextSides(props: { jira: string; here: string }): JSX.Element {
+  const { t } = usePluginHost();
+  const jira = props.jira.split('\n');
+  const here = props.here.split('\n');
+  const shared = sharedLines(jira, here);
+  const line = (text: string, kept: boolean, mark: string, key: number): JSX.Element => (
+    <Text key={key} size="sm" tone={kept ? 'muted' : 'default'} weight={kept ? 'normal' : 'strong'} block>
+      {`${kept ? '\u00a0\u00a0' : `${mark} `}${text === '' ? '\u00a0' : text}`}
+    </Text>
+  );
+  return (
+    <Stack gap="sm" data-testid="jira-text-sides">
+      <Card variant="home">
+        <Stack gap="xs">
+          <Text size="xs" tone="faint" block>
+            {t('sideJira')}
+          </Text>
+          {jira.map((text, index) => line(text, shared.left[index]!, '−', index))}
+        </Stack>
+      </Card>
+      <Card variant="home">
+        <Stack gap="xs">
+          <Text size="xs" tone="faint" block>
+            {t('sideHere')}
+          </Text>
+          {here.map((text, index) => line(text, shared.right[index]!, '+', index))}
+        </Stack>
+      </Card>
+    </Stack>
+  );
+}
 
 // The plugin's mark in the Activity Bar: two arrows chasing each other round, a board kept in step with Jira, drawn as
 // the host draws its own icons.
@@ -446,32 +516,43 @@ function SyncReview(props: { task: string; onClose: () => void; onSynced: () => 
         )}
         {plan.fields
           .filter((field) => field.verdict !== 'unchanged')
-          .map((field) => (
-            <Stack key={field.side} gap="xs">
-              <Row>
-                <Text weight="strong">{arrow[field.verdict]}</Text>
-                <Text size="sm" grow>
-                  {field.side}
+          .map((field) => {
+            // a field settled by a choice stays choosable, so the other side can be picked instead
+            const chosen = choices.take[field.side];
+            const shownSides = field.text && !field.kept && (field.verdict === 'conflict' || field.verdict === 'from-jira' || field.verdict === 'to-jira');
+            return (
+              <Stack key={field.side} gap="xs">
+                <Row>
+                  <Text weight="strong">{arrow[field.verdict]}</Text>
+                  <Text weight="strong" grow>
+                    {sideName(field.side)}
+                  </Text>
+                  {(field.verdict === 'conflict' || chosen !== undefined) && (
+                    <Seg>
+                      <SegItem selected={chosen === 'jira'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'jira' } })}>
+                        {t('keepJira')}
+                      </SegItem>
+                      <SegItem selected={chosen === 'eidos'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'eidos' } })}>
+                        {t('keepMine')}
+                      </SegItem>
+                    </Seg>
+                  )}
+                </Row>
+                <Text size="sm" tone="muted" block>
+                  {field.verdict === 'conflict' && (field.reason === undefined || field.reason === 'changed in both places' ? t('bothChangedShort') : t('cannotTell'))}
+                  {field.verdict === 'from-jira' && (shownSides ? t('fromJiraShort') : t('fromJira', { value: field.remote }))}
+                  {field.verdict === 'to-jira' && (field.kept ? t('keptHere', { reason: field.reason ?? '' }) : shownSides ? t('toJiraShort') : t('toJira', { value: field.eidos }))}
+                  {field.verdict === 'same' && t('sameBoth')}
                 </Text>
-                {field.verdict === 'conflict' && (
-                  <Seg>
-                    <SegItem selected={choices.take[field.side] === 'jira'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'jira' } })}>
-                      {t('keepJira')}
-                    </SegItem>
-                    <SegItem selected={choices.take[field.side] === 'eidos'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'eidos' } })}>
-                      {t('keepMine')}
-                    </SegItem>
-                  </Seg>
+                {field.verdict === 'conflict' && !shownSides && (
+                  <Text size="sm" block>
+                    {t('bothChanged', { here: field.eidos, jira: field.remote })}
+                  </Text>
                 )}
-              </Row>
-              <Text size="xs" tone="faint" block>
-                {field.verdict === 'from-jira' && t('fromJira', { value: field.remote })}
-                {field.verdict === 'to-jira' && (field.kept ? t('keptHere', { reason: field.reason ?? '' }) : t('toJira', { value: field.eidos }))}
-                {field.verdict === 'same' && t('sameBoth')}
-                {field.verdict === 'conflict' && t('bothChanged', { here: field.eidos, jira: field.remote })}
-              </Text>
-            </Stack>
-          ))}
+                {shownSides && <TextSides jira={field.text!.remote} here={field.text!.eidos} />}
+              </Stack>
+            );
+          })}
         {plan.status && (
           <Text size="sm" block>
             {t('statusPath', { path: [plan.status.from, ...plan.status.path].join(' → ') })}
@@ -640,6 +721,20 @@ function TicketView(): JSX.Element {
   const [creating, setCreating] = useState(false);
   usePluginEvent('fetched', again);
   usePluginEvent('changed', again);
+  // the ticket edited here is read again once the edits settle, so what a sync would send follows them without a call to Jira per keystroke
+  const openFile = (useOpen() as { file?: string }).file ?? null;
+  const settle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useFileChanges((paths) => {
+    if (openFile === null || !paths.includes(openFile)) return;
+    if (settle.current) clearTimeout(settle.current);
+    settle.current = setTimeout(again, 600);
+  });
+  useEffect(
+    () => () => {
+      if (settle.current) clearTimeout(settle.current);
+    },
+    [],
+  );
   useEffect(() => {
     hostRef.current.get<State>('state').then(
       (state) => setConnections(state.connections.map((connection) => connection.name)),
@@ -721,13 +816,13 @@ function TicketView(): JSX.Element {
             <Row>
               <Text weight="strong">{arrow[field.verdict]}</Text>
               <Text size="sm" grow>
-                {field.side}
+                {sideName(field.side)}
               </Text>
             </Row>
             <Text size="xs" tone="faint" block>
-              {field.verdict === 'from-jira' && t('fromJira', { value: field.remote })}
-              {field.verdict === 'to-jira' && (field.kept ? t('keptHere', { reason: field.reason ?? '' }) : t('toJira', { value: field.eidos }))}
-              {field.verdict === 'conflict' && t('bothChanged', { here: field.eidos, jira: field.remote })}
+              {field.verdict === 'from-jira' && (field.text ? t('fromJiraShort') : t('fromJira', { value: field.remote }))}
+              {field.verdict === 'to-jira' && (field.kept ? t('keptHere', { reason: field.reason ?? '' }) : field.text ? t('toJiraShort') : t('toJira', { value: field.eidos }))}
+              {field.verdict === 'conflict' && (field.reason === undefined || field.reason === 'changed in both places' ? t('bothChangedShort') : t('cannotTell'))}
             </Text>
           </Stack>
         ))}

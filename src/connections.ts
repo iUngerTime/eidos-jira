@@ -12,6 +12,8 @@ import { tokenStore } from './tokens.ts';
 export interface Pair {
   jira: string;
   eidos: string;
+  // a field pair's issue types (Jira REQ7), where an epic's field goes somewhere a bug's does not; absent, every type
+  types?: string[];
 }
 
 export type ParentRule = 'subtasks' | 'all' | 'none';
@@ -50,7 +52,8 @@ function readPairs(value: unknown): Pair[] | undefined {
     if (!plain(entry)) return [];
     const jira = text(entry['jira']);
     const eidos = text(entry['eidos']);
-    return jira && eidos ? [{ jira, eidos }] : [];
+    const types = Array.isArray(entry['types']) ? entry['types'].map(text).filter((type): type is string => Boolean(type)) : [];
+    return jira && eidos ? [{ jira, eidos, ...(types.length > 0 ? { types } : {}) }] : [];
   });
 }
 

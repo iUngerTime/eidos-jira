@@ -13,7 +13,7 @@ import { adfToMarkdown, type AdfContext } from './adf.ts';
 import { siteBase, type Requester } from './client.ts';
 import { siteKey, type Connection, type Pair } from './connections.ts';
 import { categoryOf } from './describe.ts';
-import { DEFAULT_TYPE, fieldsOf, linkTypeFor, priorityFor, statusFor, typeFor } from './mapping.ts';
+import { DEFAULT_TYPE, fieldsFor, fieldsOf, linkTypeFor, priorityFor, statusFor, typeFor } from './mapping.ts';
 import type { AssetsApi, BacklogApi, BoardSettings, CommentsApi, TaskFields, TaskView, ThreadView } from './types.ts';
 
 // ---- what Jira gives -----------------------------------------------------------------
@@ -344,7 +344,6 @@ export async function run(context: Context, write: boolean, options: PullOptions
   const state = readState(host.workspace, connection.name);
   const board = backlog.settings();
   const pairs = fieldsOf(connection, board);
-  const pairOf = (eidos: string): Pair | undefined => pairs.find((pair) => pair.eidos === eidos);
   const scope = await scopeJql(client, connection);
   const since = options.full || !state.last_pull ? null : new Date(new Date(state.last_pull).getTime() - OVERLAP_MINUTES * 60_000);
   const changedJql = since ? `(${scope}) AND updated >= "${jqlMoment(since, context.timeZone)}"` : scope;
@@ -422,7 +421,8 @@ export async function run(context: Context, write: boolean, options: PullOptions
     const digest: Record<string, string> = { type: short(type) };
     let parentIssue: string | null = null;
     let parentKey: string | null = null;
-    for (const pair of pairs) {
+    const issuePairs = fieldsFor(pairs, issue.fields.issuetype?.name ?? '');
+    for (const pair of issuePairs) {
       const value = issue.fields[pair.jira];
       const [head, name = ''] = pair.eidos.split(/:(.*)/s);
       switch (head) {
@@ -470,8 +470,8 @@ export async function run(context: Context, write: boolean, options: PullOptions
       }
     }
     if (fields.title === undefined) fields.title = named(issue.fields.summary) ?? issue.key;
-    for (const pair of pairs) if (pair.eidos !== 'parent') digest[pair.eidos] = short(normalise(intendedValue(fields, pair.eidos)));
-    if (pairOf('parent')) digest['parent'] = short(parentIssue);
+    for (const pair of issuePairs) if (pair.eidos !== 'parent') digest[pair.eidos] = short(normalise(intendedValue(fields, pair.eidos)));
+    if (issuePairs.some((pair) => pair.eidos === 'parent')) digest['parent'] = short(parentIssue);
     const changes: string[] = [];
     const local: string[] = [];
     if (task) {
@@ -557,12 +557,13 @@ export async function run(context: Context, write: boolean, options: PullOptions
       if (intent.local.length > 0) done.kept_local += 1;
     }
     const parentTask = intent.parentIssue ? index.get(intent.parentIssue) : undefined;
-    if (pairs.some((pair) => pair.eidos === 'parent') && !(options.keepLocal && intent.local.includes('parent'))) fields.parent = parentTask ? (parentTask.id ?? parentTask.name) : null;
+    const issuePairs = fieldsFor(pairs, issue.fields.issuetype?.name ?? '');
+    if (issuePairs.some((pair) => pair.eidos === 'parent') && !(options.keepLocal && intent.local.includes('parent'))) fields.parent = parentTask ? (parentTask.id ?? parentTask.name) : null;
     const downloads = await downloadAttachments(context, issue, task);
     done.attachments += downloads;
     const adfAgain: AdfContext = { mention, media: attachmentsFor(context, issue, task).link };
     // the text read again once attachments are in the root, so a reference points at the file
-    if (downloads > 0) rewriteTexts(fields, pairs, issue, board, adfAgain);
+    if (downloads > 0) rewriteTexts(fields, issuePairs, issue, board, adfAgain);
     const jira: Held = {
       site,
       id: issue.id,

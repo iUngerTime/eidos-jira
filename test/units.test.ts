@@ -6,7 +6,7 @@ import { adfToMarkdown } from '../src/adf.ts';
 import { siteBase } from '../src/client.ts';
 import { fromBoardUrl, opposed, readConnection, type Connection } from '../src/connections.ts';
 import type { Description } from '../src/describe.ts';
-import { checkMapping, draftMapping, priorityFor, statusFor, typeFor } from '../src/mapping.ts';
+import { checkMapping, compactFields, draftMapping, editorModel, fieldsFor, priorityFor, statusFor, typeFor } from '../src/mapping.ts';
 import { jqlMoment, moment } from '../src/pull.ts';
 import type { BoardSettings } from '../src/types.ts';
 
@@ -168,6 +168,86 @@ test('Jira REQ12: a priority with no Backlog priority of its name is drafted by 
     [],
   );
   assert.match(draftMapping(connection(), { ...BOARD, priorities: [] }, description).unmatched.join('\n'), /priority Urgent: the Backlog has no priorities/);
+});
+
+const TWO_TYPES: Description = {
+  ...DESCRIPTION,
+  types: [
+    ...DESCRIPTION.types,
+    {
+      id: '2',
+      name: 'Epic',
+      subtask: false,
+      statuses: [{ id: '2', name: 'Intake', category: 'todo' }],
+      fields: [
+        { id: 'customfield_10016', name: 'Story points', type: 'number', required: false },
+        { id: 'customfield_10040', name: 'Target', type: 'date', required: false },
+      ],
+    },
+  ],
+};
+
+test('Jira REQ7: a field pair naming an issue type holds for it alone and wins over the pair for every type', () => {
+  const pairs = [
+    { jira: 'customfield_10016', eidos: 'property:points' },
+    { jira: 'customfield_10016', eidos: 'section:description', types: ['epic'] },
+    { jira: 'customfield_10040', eidos: 'property:points', types: ['Epic'] },
+  ];
+  assert.deepEqual(
+    fieldsFor(pairs, 'Story').map((pair) => pair.eidos),
+    ['property:points'],
+  );
+  assert.deepEqual(
+    fieldsFor(pairs, 'Epic').map((pair) => `${pair.jira} ${pair.eidos}`),
+    ['customfield_10016 section:description', 'customfield_10040 property:points'],
+  );
+  const codes = (fields: Connection['mapping']['fields']) => checkMapping(connection({ fields }), BOARD, TWO_TYPES).map((problem) => problem.message);
+  assert.deepEqual(codes([{ jira: 'customfield_10016', eidos: 'property:points', types: ['Epic'] }]), [], 'a field the Epic holds');
+  assert.match(codes([{ jira: 'customfield_10040', eidos: 'property:points', types: ['Story'] }]).join('\n'), /the issue type Story has no field customfield_10040/);
+  assert.match(codes([{ jira: 'summary', eidos: 'title', types: ['Task'] }]).join('\n'), /the project has no issue type Task/);
+});
+
+test('Jira REQ12: the editor starts from the held pairs, else the suggestions, and saves a field the types share as one pair', () => {
+  const fresh = editorModel(connection(), BOARD, TWO_TYPES);
+  assert.equal(fresh.chosen.statuses['Intake'], 'Backlog', 'a status by its category');
+  assert.equal(fresh.chosen.types['Epic'], 'default');
+  assert.ok(
+    fresh.types[1]!.fields.some((field) => field.id === 'status'),
+    'every type has a status',
+  );
+  assert.deepEqual(fresh.types[1]!.fields.find((field) => field.id === 'customfield_10040')?.property, { type: 'Date' });
+  assert.ok(!fresh.types[0]!.fields.find((field) => field.id === 'customfield_10016')!.targets.includes('title'), 'a number never goes to the title');
+  const held = editorModel(connection({ types: [{ jira: 'Story', eidos: 'bug' }], statuses: [{ jira: 'Intake', eidos: 'Done' }] }), BOARD, TWO_TYPES);
+  assert.equal(held.chosen.types['Story'], 'bug');
+  assert.equal(held.chosen.types['Epic'], '', 'a type the held part leaves out is not carried');
+  assert.equal(held.chosen.statuses['Intake'], 'Done', 'any status may go anywhere');
+
+  const same = compactFields(
+    [
+      { type: 'Story', jira: 'customfield_10016', eidos: 'property:points' },
+      { type: 'Epic', jira: 'customfield_10016', eidos: 'property:points' },
+    ],
+    fresh,
+    [{ jira: 'customfield_99999', eidos: 'property:team' }],
+  );
+  assert.deepEqual(same, [
+    { jira: 'customfield_99999', eidos: 'property:team' },
+    { jira: 'customfield_10016', eidos: 'property:points' },
+  ]);
+  assert.deepEqual(
+    compactFields(
+      [
+        { type: 'Story', jira: 'customfield_10016', eidos: 'property:points' },
+        { type: 'Epic', jira: 'customfield_10016', eidos: 'section:description' },
+      ],
+      fresh,
+      [],
+    ),
+    [
+      { jira: 'customfield_10016', eidos: 'property:points', types: ['Story'] },
+      { jira: 'customfield_10016', eidos: 'section:description', types: ['Epic'] },
+    ],
+  );
 });
 
 test('Jira REQ2, REQ3: a connection is read forgivingly, and one the other way over the same project is found', () => {

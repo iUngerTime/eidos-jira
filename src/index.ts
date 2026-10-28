@@ -20,10 +20,12 @@ import {
   siteKey,
   writeConnections,
   type Connection,
+  type Mapping,
   type MappingPart,
+  type Pair,
 } from './connections.ts';
 import { cachedDescription, keepDescription, readDescription, type Description } from './describe.ts';
-import { checkMapping, draftMapping, type DraftEntry, type MappingProblem } from './mapping.ts';
+import { checkMapping, compactFields, draftMapping, editorModel, type DraftEntry, type EditorModel, type MappingChoice, type MappingProblem, PARENT_RULES } from './mapping.ts';
 import { ask, confirm, readLines } from './prompt.ts';
 import { readState, run, writeState, type Done, type Plan } from './pull.ts';
 import { tokensFile } from './tokens.ts';
@@ -45,8 +47,13 @@ export interface JiraApi {
   describe(name: string, refresh: boolean): Promise<Description>;
   draft(name: string): Promise<{ entries: DraftEntry[]; unmatched: string[] }>;
   accept(name: string, entries: Array<Pick<DraftEntry, 'part' | 'jira' | 'eidos'>>): Promise<Connection>;
-  setPair(name: string, part: MappingPart | 'parent', jira: string, eidos: string | null): Promise<{ connection: Connection; problems: MappingProblem[] }>;
+  // a field pair naming issue types takes those types from the field's other pairs, and leaves its untyped pair be
+  setPair(name: string, part: MappingPart | 'parent', jira: string, eidos: string | null, types?: string[]): Promise<{ connection: Connection; problems: MappingProblem[] }>;
   problems(name: string): MappingProblem[];
+  // The mapping editor's half (Jira REQ12): what it draws, the whole mapping it saves, and a property made for a field
+  model(name: string, refresh: boolean): Promise<EditorModel>;
+  saveMapping(name: string, chosen: MappingChoice): Promise<{ connection: Connection; problems: MappingProblem[] }>;
+  addProperty(declaration: { name: string; type: string; options?: string[] }): Promise<void>;
 }
 
 export interface SignInRow {
@@ -183,7 +190,7 @@ const entry: CliEntry = {
       const held = cachedDescription(host.workspace, connection.name);
       if (held && !refresh) return held;
       const { client } = await contextFor(host, connection);
-      const read = await readDescription(client, connection);
+      const read = await readDescription(client, connection, (stage) => host.emit('describe', { connection: connection.name, ...stage }));
       keepDescription(host.workspace, read);
       return read;
     };
@@ -260,7 +267,7 @@ const entry: CliEntry = {
         );
         return next;
       },
-      setPair: async (name, part, from, to) => {
+      setPair: async (name, part, from, to, types = []) => {
         const connection = connectionNamed(host, name);
         const next = { ...connection, mapping: { ...connection.mapping } };
         if (part === 'parent') {
@@ -270,8 +277,17 @@ const entry: CliEntry = {
         } else {
           if (!(MAPPING_PARTS as readonly string[]).includes(part)) throw new Error(`a part is one of ${[...MAPPING_PARTS, 'parent'].join(', ')}`);
           if (!from) throw new Error('name the Jira side');
-          const rest = (next.mapping[part] ?? []).filter((pair) => pair.jira.toLowerCase() !== from.toLowerCase());
-          next.mapping[part] = to === null ? rest : [...rest, { jira: from, eidos: to }];
+          if (types.length > 0 && part !== 'fields') throw new Error('only a field pair names issue types');
+          const named = (type: string): boolean => types.some((held) => held.toLowerCase() === type.toLowerCase());
+          const rest =
+            types.length === 0
+              ? (next.mapping[part] ?? []).filter((pair) => pair.jira.toLowerCase() !== from.toLowerCase())
+              : (next.mapping[part] ?? []).flatMap((pair) => {
+                  if (pair.jira.toLowerCase() !== from.toLowerCase() || !pair.types?.length) return [pair];
+                  const left = pair.types.filter((type) => !named(type));
+                  return left.length > 0 ? [{ ...pair, types: left }] : [];
+                });
+          next.mapping[part] = to === null ? rest : [...rest, { jira: from, eidos: to, ...(types.length > 0 ? { types } : {}) }];
         }
         await writeConnections(
           host,
@@ -282,6 +298,33 @@ const entry: CliEntry = {
       problems: (name) => {
         const connection = connectionNamed(host, name);
         return checkMapping(connection, backlogOf(host).settings(), cachedDescription(host.workspace, connection.name));
+      },
+      model: async (name, refresh) => {
+        const connection = connectionNamed(host, name);
+        return editorModel(connection, backlogOf(host).settings(), await description(connection, refresh));
+      },
+      saveMapping: async (name, chosen) => {
+        const connection = connectionNamed(host, name);
+        const board = backlogOf(host).settings();
+        const model = editorModel(connection, board, await description(connection, false));
+        const pairs = (values: Record<string, string> | undefined): Pair[] => Object.entries(values ?? {}).flatMap(([jira, eidos]) => (eidos ? [{ jira, eidos }] : []));
+        const mapping: Mapping = {
+          types: pairs(chosen.types),
+          statuses: pairs(chosen.statuses),
+          priorities: pairs(chosen.priorities),
+          link_types: pairs(chosen.link_types),
+          fields: compactFields(Array.isArray(chosen.fields) ? chosen.fields : [], model, connection.mapping.fields ?? []),
+          ...(PARENT_RULES.includes(chosen.parent) ? { parent: chosen.parent } : {}),
+        };
+        const next = { ...connection, mapping };
+        await writeConnections(
+          host,
+          connections(host).map((held) => (held.name === connection.name ? next : held)),
+        );
+        return { connection: next, problems: checkMapping(next, board, cachedDescription(host.workspace, connection.name)) };
+      },
+      addProperty: async (declaration) => {
+        await backlogOf(host).addProperty(declaration);
       },
     };
 
@@ -430,15 +473,21 @@ const entry: CliEntry = {
         .argument('<part>', `one of ${[...MAPPING_PARTS, 'parent'].join(', ')}`)
         .argument('[from]', 'the Jira side (a type, status, priority, link type, or field id); for parent, subtasks, all, or none')
         .argument('[to]', 'the Eidos side, for set')
+        .option('--types <names>', "a field pair's issue types, comma-separated; the pair then holds for those types alone")
         .description('change one entry of a mapping')
         .action(
-          action(async (name: string, operation: string, part: string, from?: string, to?: string) => {
+          action(async (name: string, operation: string, part: string, from: string | undefined, to: string | undefined, options: { types?: string }) => {
             const connection = connectionNamed(host, name);
             if (operation !== 'set' && operation !== 'unset') throw new Error('the operation is set or unset');
             if (part !== 'parent' && operation === 'set' && !to) throw new Error('name the Eidos side to set it to');
             const unset = operation === 'unset';
-            const { problems } = await api.setPair(connection.name, part as MappingPart | 'parent', from ?? '', unset ? null : part === 'parent' ? (from ?? '') : (to ?? ''));
-            print(`${connection.name}: ${part} ${operation === 'set' ? `${from} → ${part === 'parent' ? '' : to}` : `${from ?? ''} unset`}`.trim());
+            const types = (options.types ?? '')
+              .split(',')
+              .map((type) => type.trim())
+              .filter(Boolean);
+            const { problems } = await api.setPair(connection.name, part as MappingPart | 'parent', from ?? '', unset ? null : part === 'parent' ? (from ?? '') : (to ?? ''), types);
+            const scope = types.length > 0 ? ` (${types.join(', ')})` : '';
+            print(`${connection.name}: ${part} ${operation === 'set' ? `${from} → ${part === 'parent' ? '' : to}${scope}` : `${from ?? ''}${scope} unset`}`.trim());
             for (const problem of problems) print(`  jira/${problem.code}: ${problem.message}`);
           }),
         );

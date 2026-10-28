@@ -6,7 +6,7 @@
 // (REQ8). A pair is checked against the Jira field's schema and the Backlog's
 // declarations (REQ9) and against the connection's direction (REQ10).
 import { allFields, allStatuses, type Description, type JiraField } from './describe.ts';
-import type { Connection, Mapping, Pair } from './connections.ts';
+import type { Connection, Mapping, Pair, ParentRule } from './connections.ts';
 import type { BoardSettings, StatusCategory } from './types.ts';
 
 export const DEFAULT_TYPE = 'default';
@@ -26,6 +26,14 @@ export function defaultFields(board: BoardSettings): Pair[] {
 
 export function fieldsOf(connection: Connection, board: BoardSettings): Pair[] {
   return connection.mapping.fields ?? defaultFields(board);
+}
+
+// The field pairs that apply to one issue type: those naming it, and those naming none; a pair naming the type wins
+// over one naming none for the same Jira field.
+export function fieldsFor(pairs: Pair[], issueType: string): Pair[] {
+  const own = (pair: Pair): boolean => (pair.types ?? []).some((type) => type.toLowerCase() === issueType.toLowerCase());
+  const named = pairs.filter(own);
+  return [...named, ...pairs.filter((pair) => !pair.types?.length && !named.some((held) => held.jira === pair.jira))];
 }
 
 // A Backlog status's category, as the Backlog reads one: the root's choice,
@@ -83,7 +91,7 @@ export interface MappingProblem {
   message: string;
 }
 
-type Kind = 'text' | 'doc' | 'number' | 'date' | 'option' | 'options' | 'user' | 'users' | 'sprint' | 'parent' | 'status' | 'priority' | 'any';
+export type Kind = 'text' | 'doc' | 'number' | 'date' | 'option' | 'options' | 'user' | 'users' | 'sprint' | 'parent' | 'status' | 'priority' | 'any';
 
 const SPRINT = 'com.pyxis.greenhopper.jira:gh-sprint';
 const RICH = ['com.atlassian.jira.plugin.system.customfieldtypes:textarea'];
@@ -202,9 +210,18 @@ export function checkMapping(connection: Connection, board: BoardSettings, descr
     }
     if (connection.direction === 'push' && READ_ONLY.includes(pair.jira))
       out.push({ code: 'direction', message: `${at('field', pair)}: Jira sets ${pair.jira} and never takes it, so a push cannot carry it` });
-    const field = fields.find((held) => held.id === pair.jira || same(held.name, pair.jira));
+    // a pair naming issue types is checked against those types' fields alone
+    const named = description && pair.types?.length ? description.types.filter((type) => pair.types!.some((held) => same(held, type.name))) : [];
+    const strange = description ? (pair.types ?? []).filter((held) => !description.types.some((type) => same(type.name, held))) : [];
+    if (strange.length > 0) {
+      out.push({ code: 'target-unknown', message: `${at('field', pair)}: the project has no issue type ${strange.join(', ')}` });
+      continue;
+    }
+    const pool = named.length > 0 ? named.flatMap((type) => type.fields) : fields;
+    const field = pool.find((held) => held.id === pair.jira || same(held.name, pair.jira));
     if (description && !field && !SYSTEM[pair.jira]) {
-      out.push({ code: 'target-unknown', message: `${at('field', pair)}: the project's issue types have no field ${pair.jira} (eidos jira describe ${connection.name} lists them)` });
+      const where = named.length > 0 ? `the issue type ${named.map((type) => type.name).join(', ')} has` : "the project's issue types have";
+      out.push({ code: 'target-unknown', message: `${at('field', pair)}: ${where} no field ${pair.jira} (eidos jira describe ${connection.name} lists them)` });
       continue;
     }
     const why = carries(kindOf(field, pair.jira), pair.eidos, board);
@@ -292,4 +309,149 @@ export function draftMapping(connection: Connection, board: BoardSettings, descr
     }
   }
   return { entries, unmatched };
+}
+
+// ---- the editor -------------------------------------------------------------------
+
+// Fields the editor leaves out: what says where an issue sits rather than what it holds, and links, mapped by link_types.
+const STRUCTURAL = ['issuetype', 'project', 'issuelinks', 'attachment'];
+
+export interface EditorField {
+  id: string;
+  name: string;
+  kind: Kind;
+  // every Eidos side this field can be carried into, as the checks read one
+  targets: string[];
+  // the property a field with no fitting one would take, when the person makes it
+  property: { type: string; options?: string[] };
+}
+
+export interface EditorModel {
+  connection: string;
+  read: string;
+  types: Array<{ name: string; subtask: boolean; statuses: string[]; fields: EditorField[] }>;
+  statuses: Array<{ name: string; category: StatusCategory }>;
+  priorities: string[];
+  link_types: string[];
+  backlog: { types: string[]; statuses: string[]; priorities: string[]; link_types: string[]; properties: Array<{ name: string; type: string }> };
+  // the mapping as held, and a whole one drafted from names and categories, the page showing a held pair before a drafted one
+  mapping: Mapping;
+  suggested: Mapping;
+  // where the editor starts: the held pair, else what a pull does with a value the mapping leaves out
+  chosen: MappingChoice;
+}
+
+export const PARENT_RULES: ParentRule[] = ['subtasks', 'all', 'none'];
+
+// What the editor saves: a Backlog value for every Jira one (empty where it is not carried), and each field's place per
+// issue type.
+export interface MappingChoice {
+  types: Record<string, string>;
+  statuses: Record<string, string>;
+  priorities: Record<string, string>;
+  link_types: Record<string, string>;
+  fields: Array<{ type: string; jira: string; eidos: string }>;
+  parent: ParentRule;
+}
+
+function targetsOf(kind: Kind, board: BoardSettings): string[] {
+  const sections = [...new Set([...board.sections, ...board.types.flatMap((type) => type.sections)].filter((section) => section.type === 'text').map((section) => `section:${section.key}`))];
+  const all = ['title', 'status', 'priority', 'assignee', 'milestone', 'parent', ...sections, ...board.properties.map((property) => `property:${property.name}`)];
+  return all.filter((eidos) => carries(kind, eidos, board) === null);
+}
+
+function propertyFor(kind: Kind, field: JiraField | undefined): EditorField['property'] {
+  const options = field?.allowed;
+  if (kind === 'number') return { type: 'Number' };
+  if (kind === 'date') return { type: field?.type === 'datetime' ? 'Date & time' : 'Date' };
+  if (kind === 'options' || kind === 'users' || kind === 'sprint') return { type: 'List', ...(options ? { options } : {}) };
+  return { type: 'Text', ...(options && kind === 'option' ? { options } : {}) };
+}
+
+// Jira REQ12: every value Jira holds with the Backlog values it can go to, the mapping held, and a draft of all of it.
+export function editorModel(connection: Connection, board: BoardSettings, description: Description): EditorModel {
+  const field = (held: JiraField | undefined, id: string, name: string): EditorField => {
+    const kind = kindOf(held, id);
+    return { id, name, kind, targets: targetsOf(kind, board), property: propertyFor(kind, held) };
+  };
+  const drafted = draftMapping({ ...connection, mapping: {} }, board, description).entries;
+  const suggested: Mapping = {};
+  for (const entry of drafted) suggested[entry.part] = [...(suggested[entry.part] ?? []), { jira: entry.jira, eidos: entry.eidos }];
+  const held = connection.mapping;
+  // a value the held part leaves out is not carried, but a status, which a pull files by its category all the same
+  const start = (part: Exclude<keyof Mapping, 'parent' | 'fields'>, names: string[], leftOutSuggested: boolean): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const jira of names) {
+      const own = lookup(held[part], jira);
+      const suggestion = lookup(suggested[part], jira) ?? '';
+      if (own) out[jira] = own;
+      else if (held[part] === undefined || leftOutSuggested) out[jira] = suggestion;
+      else out[jira] = '';
+    }
+    return out;
+  };
+  const pairs = held.fields ?? suggested.fields ?? [];
+  const chosen: MappingChoice = {
+    types: start(
+      'types',
+      description.types.map((type) => type.name),
+      false,
+    ),
+    statuses: start(
+      'statuses',
+      allStatuses(description).map((status) => status.name),
+      true,
+    ),
+    priorities: start('priorities', description.priorities, false),
+    link_types: start(
+      'link_types',
+      description.link_types.map((type) => type.name),
+      false,
+    ),
+    fields: description.types.flatMap((type) => fieldsFor(pairs, type.name).map((pair) => ({ type: type.name, jira: pair.jira, eidos: pair.eidos }))),
+    parent: held.parent ?? 'subtasks',
+  };
+  return {
+    connection: connection.name,
+    read: description.read,
+    types: description.types.map((type) => ({
+      name: type.name,
+      subtask: type.subtask,
+      statuses: type.statuses.map((status) => status.name),
+      // status is never on a create screen, and every issue has one
+      fields: [field(undefined, 'status', 'Status'), ...type.fields.filter((held) => held.id && !STRUCTURAL.includes(held.id)).map((held) => field(held, held.id, held.name))],
+    })),
+    statuses: allStatuses(description).map((status) => ({ name: status.name, category: status.category })),
+    priorities: description.priorities,
+    link_types: description.link_types.map((type) => type.name),
+    backlog: {
+      types: board.types.map((type) => type.name),
+      statuses: board.statuses,
+      priorities: board.priorities,
+      link_types: board.link_types.map((type) => type.name),
+      properties: board.properties.map((property) => ({ name: property.name, type: property.type })),
+    },
+    mapping: connection.mapping,
+    suggested,
+    chosen,
+  };
+}
+
+// The field pairs a choice per issue type comes to: one pair for a field every type holding it carries to the same
+// place, else a pair per place naming its types. A held pair for a field the editor did not show is kept as it was.
+export function compactFields(chosen: Array<{ type: string; jira: string; eidos: string }>, model: EditorModel, held: Pair[]): Pair[] {
+  const shown = new Set(model.types.flatMap((type) => type.fields.map((one) => one.id)));
+  const out: Pair[] = held.filter((pair) => !shown.has(pair.jira));
+  for (const jira of [...new Set(chosen.map((choice) => choice.jira))]) {
+    const holding = model.types.filter((type) => type.fields.some((one) => one.id === jira)).map((type) => type.name);
+    const picks = chosen.filter((choice) => choice.jira === jira);
+    const places = [...new Set(picks.map((choice) => choice.eidos))];
+    const everyType = holding.every((type) => picks.some((choice) => same(choice.type, type)));
+    if (places.length === 1 && everyType) {
+      out.push({ jira, eidos: places[0]! });
+      continue;
+    }
+    for (const eidos of places) out.push({ jira, eidos, types: picks.filter((choice) => choice.eidos === eidos).map((choice) => choice.type) });
+  }
+  return out;
 }

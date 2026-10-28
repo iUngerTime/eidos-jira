@@ -67,6 +67,7 @@ export interface BacklogApi {
   unlink(name: string, type: string, other: string, direction?: 'outward' | 'inward'): TaskView;
   milestones(): Array<{ name: string; date: string | null }>;
   addMilestone(milestone: { name: string; date?: string | null }): Promise<unknown>;
+  addProperty(declaration: { name: string; type: string; options?: string[]; applies_to?: string[]; meaning?: string }): Promise<BoardSettings>;
 }
 
 export interface Author {

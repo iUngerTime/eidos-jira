@@ -7,6 +7,7 @@
 import { HostError, type AppEntry, type AppHost } from 'eidosmd/plugin';
 import { fromBoardUrl } from './connections.ts';
 import type { JiraApi } from './index.ts';
+import type { MappingChoice } from './mapping.ts';
 import type { MappingPart } from './connections.ts';
 
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
@@ -90,6 +91,23 @@ const entry: AppEntry<JiraApi> = {
         const eidos = request.body['eidos'] === null ? null : text(request.body['eidos']);
         const done = await api.setPair(text(request.body['name']), text(request.body['part']) as MappingPart | 'parent', text(request.body['jira']), eidos);
         return { problems: done.problems, state: state(host, api) };
+      }),
+    );
+
+    host.route('GET', 'model', (request) => answer(() => api.model(request.query.get('name') ?? '', request.query.get('refresh') === 'true')));
+    host.route('PUT', 'mapping', (request) =>
+      answer(async () => {
+        const mapping = request.body['mapping'];
+        if (typeof mapping !== 'object' || mapping === null || Array.isArray(mapping)) throw new Error('no mapping was sent');
+        const done = await api.saveMapping(text(request.body['name']), mapping as MappingChoice);
+        return { problems: done.problems, state: state(host, api) };
+      }),
+    );
+    host.route('POST', 'property', (request) =>
+      answer(async () => {
+        const options = Array.isArray(request.body['options']) ? request.body['options'].map(text).filter(Boolean) : [];
+        await api.addProperty({ name: text(request.body['name']), type: text(request.body['type']), ...(options.length > 0 ? { options } : {}) });
+        return api.model(text(request.body['connection']), false);
       }),
     );
 

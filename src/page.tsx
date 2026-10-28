@@ -5,7 +5,7 @@
 // plugin's own settings page in place of the host's form (signing in,
 // connecting a board by pasting its address, the mapping review, and the
 // options). Each answers through the plugin's own routes.
-import { useCallback, useEffect, useState, type JSX } from 'react';
+import { useCallback, useEffect, useRef, useState, type JSX, type MutableRefObject } from 'react';
 import {
   Badge,
   Button,
@@ -18,6 +18,8 @@ import {
   NavHead,
   Notice,
   Row,
+  Seg,
+  SegItem,
   Select,
   SettingRow,
   SettingsHead,
@@ -56,11 +58,38 @@ interface State {
   connections: ConnectionRow[];
   settings: { pull_attachments: boolean; add_people: boolean; auto_fetch: string };
 }
-interface DraftEntry {
-  part: string;
-  jira: string;
-  eidos: string;
-  why: string;
+interface EditorField {
+  id: string;
+  name: string;
+  kind: string;
+  targets: string[];
+  property: { type: string; options?: string[] };
+}
+interface Choice {
+  types: Record<string, string>;
+  statuses: Record<string, string>;
+  priorities: Record<string, string>;
+  link_types: Record<string, string>;
+  fields: Array<{ type: string; jira: string; eidos: string }>;
+  parent: 'subtasks' | 'all' | 'none';
+}
+// what the plugin's `model` route answers (its EditorModel)
+interface Model {
+  connection: string;
+  read: string;
+  types: Array<{ name: string; subtask: boolean; statuses: string[]; fields: EditorField[] }>;
+  statuses: Array<{ name: string; category: 'todo' | 'in_progress' | 'done' }>;
+  priorities: string[];
+  link_types: string[];
+  backlog: { types: string[]; statuses: string[]; priorities: string[]; link_types: string[]; properties: Array<{ name: string; type: string }> };
+  suggested: Partial<Record<Tab, Pair[]>>;
+  chosen: Choice;
+}
+interface Stage {
+  step: string;
+  name?: string;
+  n?: number;
+  of?: number;
 }
 interface Plan {
   connection: string;
@@ -77,18 +106,26 @@ interface Done {
 }
 
 const PARTS = ['types', 'statuses', 'priorities', 'link_types', 'fields'] as const;
+// the editor's tabs, statuses first as the part a person most often changes
+const TABS = ['statuses', 'types', 'priorities', 'link_types', 'fields'] as const;
+type Tab = (typeof TABS)[number];
+// the Backlog's property types a property made for a field may take (its Object is not one)
+const PROPERTY_TYPES = ['Text', 'List', 'Number', 'Checkbox', 'Date', 'Date & time'];
 
 // a refusal's words, as the host's error carries them
 const reason = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause));
 const mappedCount = (connection: ConnectionRow): number => PARTS.reduce((sum, part) => sum + (Array.isArray(connection.mapping[part]) ? (connection.mapping[part] as Pair[]).length : 0), 0);
 const planCount = (plan: Plan): number => plan.add.length + plan.change.length + plan.gone.length;
 
-// The plugin's mark in the Activity Bar: a board with an arrow down into it, drawn as the host draws its own icons.
+// The plugin's mark in the Activity Bar: two arrows chasing each other round, a board kept in step with Jira, drawn as
+// the host draws its own icons.
 function JiraIcon(): JSX.Element {
   return (
     <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M2.5 9.5v3.25c0 .41.34.75.75.75h9.5c.41 0 .75-.34.75-.75V9.5" />
-      <path d="M8 2.5v7.25M5.25 7 8 9.75 10.75 7" />
+      <path d="M13.25 6.5A5.5 5.5 0 0 0 3.4 4.4" />
+      <path d="M3 1.75V4.75H6" />
+      <path d="M2.75 9.5a5.5 5.5 0 0 0 9.85 2.1" />
+      <path d="M13 14.25V11.25H10" />
     </svg>
   );
 }
@@ -112,11 +149,19 @@ function useActions(host: PluginHost): { busy: string | null; act: <T>(key: stri
   return { busy, act };
 }
 
+// The host is made again whenever the page's own state changes (a Backlog setting written, for one); a read made once per
+// page or per board reaches it through this, so it is not made again each time.
+function useHostRef(host: PluginHost): MutableRefObject<PluginHost> {
+  const ref = useRef(host);
+  ref.current = host;
+  return ref;
+}
+
 function useJiraState(): { state: State | null; setState: (next: State) => void; reload: () => void } {
-  const host = usePluginHost();
+  const host = useHostRef(usePluginHost());
   const [state, setState] = useState<State | null>(null);
   const reload = useCallback(() => {
-    host.get<State>('state').then(setState, (cause) => host.toast(host.t('loadFailed'), 'error', reason(cause)));
+    host.current.get<State>('state').then(setState, (cause) => host.current.toast(host.current.t('loadFailed'), 'error', reason(cause)));
   }, [host]);
   useEffect(reload, [reload]);
   // a fetch the app's server ran on its own (auto_fetch) reaches the page as this event
@@ -404,30 +449,48 @@ function Boards(props: { state: State; busy: string | null; act: Act; take: (ans
   );
 }
 
-// The drafted mapping as a review, as `eidos jira map` asks it: each proposed pair switched on to take it, written together.
+// The mapping editor (Jira REQ12): every value Jira holds beside the Backlog value it maps to, the held pair or a
+// suggestion first, each changeable; fields per issue type, with a property made on the spot for a field none fits.
+// While Jira is read, each stage of the read is shown as it starts.
 function Mapping(props: { name: string; onClose: () => void; onSaved: (answer: { state: State }) => void }): JSX.Element {
   const host = usePluginHost();
   const { t } = host;
-  const [draft, setDraft] = useState<{ entries: DraftEntry[]; unmatched: string[] } | null>(null);
+  const [model, setModel] = useState<Model | null>(null);
+  const [chosen, setChosen] = useState<Choice | null>(null);
+  const [stages, setStages] = useState<Stage[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [taken, setTaken] = useState<Set<number>>(new Set());
+  const [tab, setTab] = useState<Tab>('statuses');
   const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    host.get<{ entries: DraftEntry[]; unmatched: string[] }>(`draft?name=${encodeURIComponent(props.name)}`).then(
-      (read) => {
-        setDraft(read);
-        setTaken(new Set(read.entries.map((_entry, index) => index)));
-      },
-      (cause) => setError(reason(cause)),
-    );
-  }, [host, props.name]);
+  const hostRef = useHostRef(host);
+  const read = useCallback(
+    (refresh: boolean) => {
+      setModel(null);
+      setStages([]);
+      setError(null);
+      hostRef.current.get<Model>(`model?name=${encodeURIComponent(props.name)}${refresh ? '&refresh=true' : ''}`).then(
+        (next) => {
+          setModel(next);
+          setChosen(next.chosen);
+        },
+        (cause) => setError(reason(cause)),
+      );
+    },
+    [hostRef, props.name],
+  );
+  useEffect(() => read(false), [read]);
+  usePluginEvent('describe', (payload) => {
+    const stage = payload as Stage & { connection?: string };
+    if (stage.connection === props.name) setStages((held) => [...held, stage]);
+  });
+
   const save = async (): Promise<void> => {
-    if (!draft) return;
+    if (!chosen) return;
     setSaving(true);
     try {
-      const entries = draft.entries.filter((_entry, index) => taken.has(index)).map(({ part, jira, eidos }) => ({ part, jira, eidos }));
-      props.onSaved(await host.post<{ state: State }>('accept', { name: props.name, entries }));
-      host.toast(t('mappingSaved', { n: entries.length }), 'success', props.name);
+      const answer = await host.put<{ problems: Array<{ message: string }>; state: State }>('mapping', { name: props.name, mapping: chosen });
+      props.onSaved(answer);
+      if (answer.problems.length > 0) host.toast(t('mappingProblems', { n: answer.problems.length }), 'error', answer.problems[0]!.message);
+      else host.toast(t('mappingSaved'), 'success', props.name);
       props.onClose();
     } catch (cause) {
       host.toast(t('failed'), 'error', reason(cause));
@@ -435,47 +498,29 @@ function Mapping(props: { name: string; onClose: () => void; onSaved: (answer: {
       setSaving(false);
     }
   };
-  const toggle = (index: number, on: boolean): void =>
-    setTaken((held) => {
-      const next = new Set(held);
-      if (on) next.add(index);
-      else next.delete(index);
-      return next;
-    });
+
   let body: JSX.Element;
   if (error) body = <Notice>{error}</Notice>;
-  else if (!draft) body = <Text tone="faint">{t('readingBoard')}</Text>;
-  else if (draft.entries.length === 0) body = <Text tone="faint">{t('nothingToMap')}</Text>;
+  else if (!model || !chosen) body = <Reading stages={stages} />;
   else
     body = (
       <Stack gap="md">
-        {PARTS.filter((part) => draft.entries.some((entry) => entry.part === part)).map((part) => (
-          <Stack key={part} gap="xs">
-            <SettingsHead>{t(`part_${part}`)}</SettingsHead>
-            <Card variant="grouped">
-              {draft.entries.map((entry, index) =>
-                entry.part !== part ? null : (
-                  <SettingRow
-                    key={index}
-                    label={`${entry.jira} → ${entry.eidos}`}
-                    hint={entry.why}
-                    control={
-                      <Switch
-                        checked={taken.has(index)}
-                        aria-label={`${entry.jira} → ${entry.eidos}`}
-                        onChange={(event: { currentTarget: HTMLInputElement }) => toggle(index, event.currentTarget.checked)}
-                      />
-                    }
-                  />
-                ),
-              )}
-            </Card>
+        <Notice>
+          <Stack gap="xs">
+            <Text size="sm" block>
+              {t('backlogFirst')}
+            </Text>
+            <Row>
+              <Button size="sm" onClick={() => host.navigate('/plugins/backlog')}>
+                {t('openBacklog')}
+              </Button>
+            </Row>
           </Stack>
-        ))}
-        {draft.unmatched.length > 0 && (
-          <Notice>
-            {t('unmatched')} {draft.unmatched.join('; ')}
-          </Notice>
+        </Notice>
+        {tab === 'fields' ? (
+          <Fields model={model} chosen={chosen} setChosen={setChosen} setModel={setModel} connection={props.name} />
+        ) : (
+          <Values tab={tab} model={model} chosen={chosen} setChosen={setChosen} />
         )}
       </Stack>
     );
@@ -484,19 +529,299 @@ function Mapping(props: { name: string; onClose: () => void; onSaved: (answer: {
       size="lg"
       title={t('mappingTitle', { name: props.name })}
       onClose={props.onClose}
+      head={
+        model ? (
+          <Seg>
+            {TABS.map((each) => (
+              <SegItem key={each} active={tab === each} onClick={() => setTab(each)}>
+                {t(`part_${each}`)}
+              </SegItem>
+            ))}
+          </Seg>
+        ) : null
+      }
       foot={
-        <Row justify="end">
-          <Button variant="quiet" onClick={props.onClose}>
-            {t('cancel')}
-          </Button>
-          <Button variant="primary" disabled={saving || !draft || draft.entries.length === 0} onClick={() => void save()} data-testid="jira-save-mapping">
-            {t('saveMapping', { n: taken.size })}
-          </Button>
+        <Row justify="between">
+          <Row>
+            {model && (
+              <Text size="xs" tone="faint">
+                {t('readFrom', { date: new Date(model.read).toLocaleString() })}
+              </Text>
+            )}
+            <Button size="sm" variant="quiet" disabled={!model} onClick={() => read(true)}>
+              {t('readAgain')}
+            </Button>
+          </Row>
+          <Row>
+            <Button variant="quiet" onClick={props.onClose}>
+              {t('cancel')}
+            </Button>
+            <Button variant="primary" disabled={saving || !model || !chosen} onClick={() => void save()} data-testid="jira-save-mapping">
+              {t(saving ? 'savingMapping' : 'saveMapping')}
+            </Button>
+          </Row>
         </Row>
       }
     >
       <Card variant="home">{body}</Card>
     </Modal>
+  );
+}
+
+// What is being asked of Jira, a line per stage begun, the last one still going.
+function Reading(props: { stages: Stage[] }): JSX.Element {
+  const { t } = usePluginHost();
+  if (props.stages.length === 0)
+    return (
+      <Stack>
+        <Text tone="faint">{t('readingBoard')}</Text>
+        <SkeletonBar width="60%" />
+      </Stack>
+    );
+  // an issue type's line stands in for the one before it, so seven types are one line counting up
+  const lines = props.stages.filter((stage, at) => !(stage.step === 'type' && props.stages[at + 1]?.step === 'type'));
+  return (
+    <Stack gap="xs" data-testid="jira-reading">
+      {lines.map((stage, at) => {
+        const last = at === lines.length - 1;
+        return (
+          <Text key={`${stage.step}${stage.n ?? ''}`} size="sm" tone={last ? 'default' : 'faint'} block>
+            {last ? '… ' : '✓ '}
+            {t(`stage_${stage.step}`, { name: stage.name ?? '', n: stage.n ?? 0, of: stage.of ?? 0 })}
+          </Text>
+        );
+      })}
+      <SkeletonBar width="60%" />
+    </Stack>
+  );
+}
+
+// Issue types, statuses, priorities, or link types: a row per Jira value, "maps to", and the Backlog's values.
+function Values(props: { tab: Exclude<Tab, 'fields'>; model: Model; chosen: Choice; setChosen: (next: Choice) => void }): JSX.Element {
+  const { t } = usePluginHost();
+  const { model, chosen, tab } = props;
+  const set = (jira: string, eidos: string): void => props.setChosen({ ...chosen, [tab]: { ...chosen[tab], [jira]: eidos } });
+  const suggestion = (jira: string): string => model.suggested[tab]?.find((pair) => pair.jira.toLowerCase() === jira.toLowerCase())?.eidos ?? '';
+  let rows: Array<{ jira: string; hint: string }>;
+  let targets: string[];
+  // a status always lands somewhere (its category), the others may be left out
+  let empty: string | null = t('notCarried');
+  if (tab === 'types') {
+    rows = model.types.map((type) => ({ jira: type.name, hint: t(type.subtask ? 'jiraSubtask' : 'jiraType') }));
+    targets = model.backlog.types;
+  } else if (tab === 'statuses') {
+    rows = model.statuses.map((status) => ({
+      jira: status.name,
+      hint: t('jiraStatus', {
+        category: t(`category_${status.category}`),
+        types: model.types
+          .filter((type) => type.statuses.includes(status.name))
+          .map((type) => type.name)
+          .join(', '),
+      }),
+    }));
+    targets = model.backlog.statuses;
+    empty = null;
+  } else if (tab === 'priorities') {
+    rows = model.priorities.map((priority, at) => ({ jira: priority, hint: t('jiraPriority', { n: at + 1, of: model.priorities.length }) }));
+    targets = model.backlog.priorities;
+    empty = t('noPriority');
+  } else {
+    rows = model.link_types.map((type) => ({ jira: type, hint: t('jiraLink') }));
+    targets = model.backlog.link_types;
+  }
+  if (targets.length === 0) return <Notice>{t(`backlogHasNo_${tab}`)}</Notice>;
+  return (
+    <Stack gap="sm">
+      <Card variant="grouped">
+        {rows.map((row) => {
+          const proposed = suggestion(row.jira);
+          return (
+            <SettingRow
+              key={row.jira}
+              label={row.jira}
+              hint={proposed ? `${row.hint} · ${t('suggested', { value: proposed })}` : row.hint}
+              control={
+                <Row>
+                  <Text size="sm" tone="muted">
+                    {t('mapsTo')}
+                  </Text>
+                  <Select aria-label={t('mapsToLabel', { jira: row.jira })} value={chosen[tab][row.jira] ?? ''} onChange={(event: { target: HTMLSelectElement }) => set(row.jira, event.target.value)}>
+                    {empty !== null && <option value="">{empty}</option>}
+                    {targets.map((target) => (
+                      <option key={target} value={target}>
+                        {target}
+                      </option>
+                    ))}
+                  </Select>
+                </Row>
+              }
+            />
+          );
+        })}
+        {tab === 'types' && (
+          <SettingRow
+            label={t('parentRule')}
+            hint={t('parentRuleHint')}
+            control={
+              <Select
+                aria-label={t('parentRule')}
+                value={chosen.parent}
+                onChange={(event: { target: HTMLSelectElement }) => props.setChosen({ ...chosen, parent: event.target.value as Choice['parent'] })}
+              >
+                {(['subtasks', 'all', 'none'] as const).map((rule) => (
+                  <option key={rule} value={rule}>
+                    {t(`parent_${rule}`)}
+                  </option>
+                ))}
+              </Select>
+            }
+          />
+        )}
+      </Card>
+    </Stack>
+  );
+}
+
+// the choice that makes a property instead of naming one; no target starts with +
+const NEW_PROPERTY = '+new';
+
+// A target as the person reads it: a field of the task, a section, or a property.
+function targetLabel(t: PluginHost['t'], target: string): string {
+  const [head, name = ''] = target.split(/:(.*)/s);
+  if (head === 'section' || head === 'property') return t(`target_${head}`, { name });
+  return t(`target_${target}`);
+}
+
+// One issue type's fields at a time, each mapped to where it lands on a task; a change goes to every issue type
+// holding the field unless the person keeps it to this one.
+function Fields(props: { model: Model; chosen: Choice; setChosen: (next: Choice) => void; setModel: (next: Model) => void; connection: string }): JSX.Element {
+  const host = usePluginHost();
+  const { t } = host;
+  const { model, chosen } = props;
+  const [type, setType] = useState(model.types.find((each) => !each.subtask)?.name ?? model.types[0]?.name ?? '');
+  const [together, setTogether] = useState(true);
+  const [making, setMaking] = useState<{ field: EditorField; name: string; type: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const shown = model.types.find((each) => each.name === type);
+  const placeOf = (typeName: string, jira: string): string => chosen.fields.find((pair) => pair.type === typeName && pair.jira === jira)?.eidos ?? '';
+  const setPlace = (jira: string, eidos: string): void => {
+    const over = together ? model.types.filter((each) => each.fields.some((field) => field.id === jira)).map((each) => each.name) : [type];
+    const rest = chosen.fields.filter((pair) => !(pair.jira === jira && over.includes(pair.type)));
+    props.setChosen({ ...chosen, fields: eidos ? [...rest, ...over.map((each) => ({ type: each, jira, eidos }))] : rest });
+  };
+  const differs = (jira: string): boolean => new Set(model.types.filter((each) => each.fields.some((field) => field.id === jira)).map((each) => placeOf(each.name, jira))).size > 1;
+  const create = async (): Promise<void> => {
+    if (!making) return;
+    setBusy(true);
+    try {
+      const next = await host.post<Model>('property', {
+        connection: props.connection,
+        name: making.name,
+        type: making.type,
+        options: ['Text', 'List'].includes(making.type) ? (making.field.property.options ?? []) : [],
+      });
+      props.setModel({ ...next, chosen });
+      setPlace(making.field.id, `property:${making.name}`);
+      host.toast(t('propertyCreated', { name: making.name }), 'success');
+      setMaking(null);
+    } catch (cause) {
+      host.toast(t('failed'), 'error', reason(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!shown) return <Text tone="faint">{t('noTypes')}</Text>;
+  return (
+    <Stack gap="sm">
+      <Row wrap>
+        <Text size="sm" tone="muted">
+          {t('fieldsOf')}
+        </Text>
+        <Select aria-label={t('fieldsOf')} value={type} onChange={(event: { target: HTMLSelectElement }) => setType(event.target.value)}>
+          {model.types.map((each) => (
+            <option key={each.name} value={each.name}>
+              {each.name}
+            </option>
+          ))}
+        </Select>
+        <Switch checked={together} aria-label={t('together')} onChange={(event: { currentTarget: HTMLInputElement }) => setTogether(event.currentTarget.checked)} />
+        <Text size="sm">{t('together')}</Text>
+      </Row>
+      <Card variant="grouped">
+        {shown.fields.map((field) => [
+          <SettingRow
+            key={field.id}
+            label={field.name}
+            hint={t('fieldHint', { id: field.id, kind: t(`kind_${field.kind}`) })}
+            badge={differs(field.id) ? <Badge>{t('differs')}</Badge> : null}
+            control={
+              <Row>
+                <Text size="sm" tone="muted">
+                  {t('mapsTo')}
+                </Text>
+                <Select
+                  aria-label={t('mapsToLabel', { jira: field.name })}
+                  value={placeOf(type, field.id)}
+                  onChange={(event: { target: HTMLSelectElement }) => {
+                    if (event.target.value === NEW_PROPERTY)
+                      setMaking({
+                        field,
+                        name: field.name
+                          .replace(/[^A-Za-z0-9_-]+/g, '_')
+                          .replace(/^_+|_+$/g, '')
+                          .toLowerCase(),
+                        type: field.property.type,
+                      });
+                    else setPlace(field.id, event.target.value);
+                  }}
+                >
+                  <option value="">{t('notCarried')}</option>
+                  {field.targets.map((target) => (
+                    <option key={target} value={target}>
+                      {targetLabel(t, target)}
+                    </option>
+                  ))}
+                  <option value={NEW_PROPERTY}>{t('newProperty')}</option>
+                </Select>
+              </Row>
+            }
+          />,
+          making?.field.id === field.id ? (
+            <SettingRow
+              key={`${field.id}:new`}
+              stacked
+              data-testid="jira-new-property"
+              label={t('newPropertyTitle', { field: making.field.name })}
+              hint={making.field.property.options ? t('propertyOptions', { options: making.field.property.options.join(', ') }) : null}
+              control={
+                <Row wrap>
+                  <Input
+                    aria-label={t('propertyName')}
+                    placeholder={t('propertyName')}
+                    value={making.name}
+                    onChange={(event: { target: HTMLInputElement }) => setMaking({ ...making, name: event.target.value })}
+                  />
+                  <Select aria-label={t('propertyType')} value={making.type} onChange={(event: { target: HTMLSelectElement }) => setMaking({ ...making, type: event.target.value })}>
+                    {PROPERTY_TYPES.map((each) => (
+                      <option key={each} value={each}>
+                        {each}
+                      </option>
+                    ))}
+                  </Select>
+                  <Button variant="quiet" onClick={() => setMaking(null)}>
+                    {t('cancel')}
+                  </Button>
+                  <Button variant="primary" disabled={busy || !making.name.trim()} onClick={() => void create()}>
+                    {t('createProperty')}
+                  </Button>
+                </Row>
+              }
+            />
+          ) : null,
+        ])}
+      </Card>
+    </Stack>
   );
 }
 

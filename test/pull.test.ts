@@ -143,6 +143,16 @@ test('Jira REQ9: a pair that cannot be carried is a jira/ finding with what to d
   await ok(['jira', 'configure:map', 'acme', 'unset', 'fields', 'customfield_10016']);
 });
 
+test('Jira REQ7: a field pair can hold for some issue types alone, and unsetting it for them leaves the rest', async () => {
+  const file = path.join(root, '.eidos', 'plugins', 'jira', 'settings.yaml');
+  const before = readFileSync(file, 'utf8');
+  assert.match(await ok(['jira', 'configure:map', 'acme', 'set', 'fields', 'duedate', 'title', '--types', 'Epic,Story']), /fields duedate → title \(Epic, Story\)/);
+  await ok(['jira', 'configure:map', 'acme', 'unset', 'fields', 'duedate', '--types', 'Story']);
+  assert.match(readFileSync(file, 'utf8'), /jira: duedate\n\s+eidos: title\n\s+types:\n\s+- Epic\n(?!\s+- Story)/);
+  await ok(['jira', 'configure:map', 'acme', 'unset', 'fields', 'duedate']);
+  assert.equal(readFileSync(file, 'utf8'), before);
+});
+
 test('Jira Pull REQ1, REQ2, REQ4, REQ7 to REQ10: a fetch writes nothing; a pull writes each issue as a task with its key for an id, its comments as a thread signed by the Jira names, adding no user', async () => {
   await ok(['users', 'add', 'Ada Example', '--alias', 'ada']);
   const before = snapshot();

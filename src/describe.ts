@@ -78,7 +78,17 @@ async function all<T>(client: Requester, url: string, query: Record<string, stri
 
 const SPRINT = 'com.pyxis.greenhopper.jira:gh-sprint';
 
-export async function readDescription(client: Requester, connection: Connection): Promise<Description> {
+// Each stage of a read as it starts, so a page can show what is being asked of Jira while it waits.
+export interface Stage {
+  step: 'statuses' | 'board' | 'type' | 'priorities' | 'link_types' | 'sprints';
+  // the issue type being read, and where it falls among them
+  name?: string;
+  n?: number;
+  of?: number;
+}
+
+export async function readDescription(client: Requester, connection: Connection, onStage: (stage: Stage) => void = () => {}): Promise<Description> {
+  onStage({ step: 'statuses' });
   let columns: Description['columns'] = [];
   let filter: string | null = null;
   const statusNames = new Map<string, string>();
@@ -87,6 +97,7 @@ export async function readDescription(client: Requester, connection: Connection)
   );
   for (const type of projectStatuses) for (const status of type.statuses) statusNames.set(status.id, status.name);
   if (connection.board !== undefined) {
+    onStage({ step: 'board' });
     const configuration = await client.get<{ filter?: { id?: string }; columnConfig?: { columns?: Array<{ name: string; statuses?: Array<{ id: string }> }> } }>(
       `/rest/agile/1.0/board/${connection.board}/configuration`,
     );
@@ -104,7 +115,8 @@ export async function readDescription(client: Requester, connection: Connection)
   const created = await all<{ id: string; name: string; subtask?: boolean }>(client, `/rest/api/3/issue/createmeta/${encodeURIComponent(connection.project)}/issuetypes`, {}, 'issueTypes');
   const types: JiraType[] = [];
   let sprintField: string | null = null;
-  for (const type of created) {
+  for (const [at, type] of created.entries()) {
+    onStage({ step: 'type', name: type.name, n: at + 1, of: created.length });
     const fields = await all<{
       fieldId: string;
       key?: string;
@@ -135,8 +147,11 @@ export async function readDescription(client: Requester, connection: Connection)
       }),
     });
   }
+  onStage({ step: 'priorities' });
   const priorities = (await all<{ name: string }>(client, '/rest/api/3/priority/search')).map((priority) => priority.name);
+  onStage({ step: 'link_types' });
   const links = await client.get<{ issueLinkTypes?: Array<{ name: string; outward: string; inward: string }> }>('/rest/api/3/issueLinkType');
+  if (connection.board !== undefined) onStage({ step: 'sprints' });
   const sprints =
     connection.board === undefined
       ? []

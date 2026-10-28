@@ -100,7 +100,7 @@ Set one with `eidos plugin set jira <setting> <value>`.
 
 ## Your token
 
-Your API token is kept in one file on your machine, `plugins/jira/credentials.json` in the Eidos app data folder, readable only by you. It never goes into a root, a settings file, a log, or a commit. In a script, set `JIRA_EMAIL` and `JIRA_API_TOKEN` instead. `eidos jira logout <site>` removes it.
+Your API token is kept in one file on your machine, `plugins/jira/credentials.json` in the Eidos app data folder, readable only by you. It never goes into a root, a settings file, a log, or a commit. In a script, set `JIRA_EMAIL` and `JIRA_API_TOKEN` instead. It may keep several accounts for a site: each root uses its own pick or, without one, the default (`eidos jira login <site> --global`, or Make default on the settings page). `eidos jira use <site> <email>` switches the account a root uses, and `eidos jira logout <site> --email <email>` removes one; without `--email`, all of them.
 
 ## Develop
 

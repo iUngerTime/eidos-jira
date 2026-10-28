@@ -47,6 +47,7 @@ function state(host: AppHost, api: JiraApi): Record<string, unknown> {
   const waiting = api.syncStatus();
   return {
     sign_ins: api.signIns(),
+    held: api.heldSignIns(),
     connections: api.connections().map((connection) => ({
       ...connection,
       problems: api.problems(connection.name),
@@ -70,8 +71,14 @@ const entry: AppEntry<JiraApi> = {
     );
     host.route('POST', 'logout', (request) =>
       answer(async () => {
-        const out = await api.logout(text(request.body['site']));
+        const out = await api.logout(text(request.body['site']), text(request.body['email']) || undefined);
         return { signed_out: out, state: state(host, api) };
+      }),
+    );
+    host.route('POST', 'use', (request) =>
+      answer(async () => {
+        await api.use(text(request.body['site']), text(request.body['email']), request.body['global'] === true);
+        return { state: state(host, api) };
       }),
     );
 

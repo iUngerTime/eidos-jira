@@ -13,7 +13,7 @@ Jira is a plugin from outside the package (`@iungertime/jira`) that connects a r
 
 ### Commands
 
-- `eidos jira login <site> [--global] [--email <email>]`: asks for the email and the API token (hidden; read from stdin without a terminal), checks them against Jira, keeps them. `logout <site>`, `whoami [--json]`.
+- `eidos jira login <site> [--global] [--email <email>]`: asks for the email and the API token (hidden; read from stdin without a terminal), checks them against Jira, keeps them; `--global` makes the account the default for every root, otherwise only this root uses it. A machine may keep several accounts for a site: `use <site> <email> [--global]` picks one for this root or as the default, `logout <site> [--email <email>]` signs out one or all, `whoami [--json]` says which this root uses.
 - `eidos jira connect <name> --site <site> --project <KEY> [--board <id>] [--jql <jql>]`, `disconnect <name>`.
 - `eidos jira describe <connection> [--refresh] [--json]`: the board's columns, issue types with statuses and fields, priorities, link types, sprints.
 - `eidos jira map <connection> [--yes] [--json]`: a mapping drafted by names and categories; in a terminal each entry is asked, `--yes` accepts all, `--json` prints the draft (`{ entries: [{ part, jira, eidos, why }], unmatched: [] }`).

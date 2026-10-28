@@ -9,6 +9,7 @@ import {
   connection as connectionNamed,
   connections,
   credentials,
+  heldSignIns,
   MAPPING_PARTS,
   readConnection,
   removeSignIn,
@@ -18,6 +19,7 @@ import {
   signedInSites,
   type Scope,
   siteKey,
+  useSignIn,
   writeConnections,
   type Connection,
   type Mapping,
@@ -43,7 +45,10 @@ export interface JiraApi {
   // each site this root's connections use or a sign-in names, with who signs in there and where that is kept
   signIns(): SignInRow[];
   login(site: string, email: string, token: string, global: boolean): Promise<{ site: string; email: string; name: string }>;
-  logout(site: string): Promise<string[]>;
+  logout(site: string, email?: string): Promise<string[]>;
+  // every account kept on this machine, and which one is the default and which one this root picked
+  heldSignIns(): Array<{ site: string; email: string; default: boolean; picked: boolean }>;
+  use(site: string, email: string, global: boolean): Promise<void>;
   connect(input: { name: string; site: string; project: string; board?: string | number; jql?: string; direction?: 'pull' | 'push'; restricted_comments?: boolean }): Promise<Connection>;
   disconnect(name: string): Promise<void>;
   describe(name: string, refresh: boolean): Promise<Description>;
@@ -172,7 +177,8 @@ function describeSync(plan: SyncPlan): string {
             : `here ${field.eidos} | Jira ${field.remote}`;
     lines.push(`  ${arrows[field.verdict]} ${field.side.padEnd(22)} ${what}`);
   }
-  if (plan.status) lines.push(`  → status: ${plan.status.from} → ${plan.status.path.join(' → ')}${Object.keys(plan.status.fields).length > 0 ? ` (${Object.keys(plan.status.fields).join(', ')})` : ''}`);
+  if (plan.status)
+    lines.push(`  → status: ${plan.status.from} → ${plan.status.path.join(' → ')}${Object.keys(plan.status.fields).length > 0 ? ` (${Object.keys(plan.status.fields).join(', ')})` : ''}`);
   for (const comment of plan.comments) lines.push(`  → comment: ${comment.text.replace(/\s+/g, ' ').slice(0, 80)}`);
   for (const [side, lost] of Object.entries(plan.loss)) lines.push(`  ⚠ ${side} drops from Jira: ${lost.map((entry) => `${entry.count} ${entry.kind}`).join(', ')}`);
   for (const blocker of plan.blockers) lines.push(`  ✗ ${blocker.message}\n      fix: ${blocker.fix}`);
@@ -182,7 +188,8 @@ function describeSync(plan: SyncPlan): string {
 function describeCreate(plan: CreatePlan): string {
   if (plan.recovering) return `${plan.task} → ${plan.project}: a create was cut short; it is looked for by its mark`;
   const lines = [`${plan.task} → a new ${plan.type ?? '?'} in ${plan.project}${plan.parent ? ` under ${plan.parent}` : ''}`];
-  for (const field of plan.fields) lines.push(`    ${field.jira.padEnd(20)} ${field.value}${field.from === 'task' ? '' : `  (${field.from === 'default' ? "the mapping's create default" : '--field'})`}`);
+  for (const field of plan.fields)
+    lines.push(`    ${field.jira.padEnd(20)} ${field.value}${field.from === 'task' ? '' : `  (${field.from === 'default' ? "the mapping's create default" : '--field'})`}`);
   if (plan.later.length > 0) lines.push(`    not on the create screen, sent by the first sync: ${plan.later.join(', ')}`);
   for (const blocker of plan.blockers) lines.push(`  ✗ ${blocker.message}\n      fix: ${blocker.fix}`);
   return lines.join('\n');
@@ -217,7 +224,8 @@ function describePlan(plan: Plan): string {
   for (const add of plan.add) lines.push(`  + ${add.key}  ${add.title} (${add.type})`);
   for (const change of plan.change) lines.push(`  ~ ${change.key}  ${change.task}${change.fields.length > 0 ? `: ${change.fields.join(', ')}` : ''}`);
   for (const waiting of plan.waiting ?? []) lines.push(`  … ${waiting.key}  made by ${waiting.task}'s create, cut short; eidos jira create ${waiting.task} links it`);
-  for (const owned of plan.owned ?? []) lines.push(`  ⇄ ${owned.key}  ${owned.task}: Jira changed ${owned.fields.join(', ')}, which this root owns; the pull leaves them (eidos jira sync ${owned.task} settles it)`);
+  for (const owned of plan.owned ?? [])
+    lines.push(`  ⇄ ${owned.key}  ${owned.task}: Jira changed ${owned.fields.join(', ')}, which this root owns; the pull leaves them (eidos jira sync ${owned.task} settles it)`);
   for (const local of plan.local) lines.push(`  ! ${local.key}  ${local.task} was edited here: ${local.fields.join(', ')} (a pull overwrites it; --keep-local keeps it)`);
   for (const person of plan.people) lines.push(`  @ ${person}`);
   for (const gone of plan.gone) lines.push(`  - ${gone.key}  ${gone.task} is gone from the scope; its task stays`);
@@ -315,7 +323,9 @@ const entry: CliEntry = {
         await saveSignIn(host, site, { email: email.trim(), token: token.trim() }, global);
         return { site: siteKey(site), email: email.trim(), name: me.displayName ?? email.trim() };
       },
-      logout: (site) => removeSignIn(host, site),
+      logout: (site, email) => removeSignIn(host, site, email),
+      heldSignIns: () => heldSignIns(host),
+      use: (site, email, global) => useSignIn(host, site, email.trim(), global),
       connect: async (input) => {
         const made = readConnection({ ...input, direction: input.direction ?? 'pull', mapping: {} });
         if (!made) throw new Error('a connection needs a name, a site, and a project');
@@ -392,9 +402,14 @@ const entry: CliEntry = {
           if (marks.push && part === 'fields') throw new Error('--push names the Jira value a Backlog value is sent as; a field takes --owner');
           if (marks.owner && part !== 'fields') throw new Error('--owner is for a field pair');
           // the one Jira value a Backlog value is sent as: marking one unmarks the others of that Backlog value
-          const unmarked = marks.push && to !== null ? rest.map((pair) => (pair.eidos.toLowerCase() === to.toLowerCase() && pair.push ? { jira: pair.jira, eidos: pair.eidos, ...(pair.types ? { types: pair.types } : {}) } : pair)) : rest;
+          const unmarked =
+            marks.push && to !== null
+              ? rest.map((pair) => (pair.eidos.toLowerCase() === to.toLowerCase() && pair.push ? { jira: pair.jira, eidos: pair.eidos, ...(pair.types ? { types: pair.types } : {}) } : pair))
+              : rest;
           next.mapping[part] =
-            to === null ? rest : [...unmarked, { jira: from, eidos: to, ...(types.length > 0 ? { types } : {}), ...(marks.push ? { push: true } : {}), ...(marks.owner ? { owner: marks.owner } : {}) }];
+            to === null
+              ? rest
+              : [...unmarked, { jira: from, eidos: to, ...(types.length > 0 ? { types } : {}), ...(marks.push ? { push: true } : {}), ...(marks.owner ? { owner: marks.owner } : {}) }];
         }
         await writeConnections(
           host,
@@ -513,7 +528,7 @@ const entry: CliEntry = {
       command
         .command('login')
         .argument('<site>', 'the Jira site, <name>.atlassian.net')
-        .option('--global', 'keep the sign-in for every root on this machine, not only this one')
+        .option('--global', 'make it the default sign-in for every root on this machine, not only the one this root uses')
         .option('--email <email>', 'the Atlassian account email (asked when not given)')
         .description('sign in to a Jira site with your Atlassian email and an API token, checked against Jira before it is kept')
         .action(
@@ -536,11 +551,25 @@ const entry: CliEntry = {
       command
         .command('logout')
         .argument('<site>', 'the Jira site')
-        .description("remove this root's and this machine's sign-in to a site, and its tokens from the credentials file")
+        .option('--email <email>', 'sign out only this account')
+        .description("remove this root's and this machine's sign-in to a site, and its tokens from the credentials file; with --email, that account's alone")
         .action(
-          action(async (site: string) => {
-            const out = await api.logout(site);
+          action(async (site: string, options: { email?: string }) => {
+            const out = await api.logout(site, options.email);
             print(out.length > 0 ? `Signed out of ${siteKey(site)}: ${out.join(', ')}.` : `Nobody was signed in to ${siteKey(site)} here.`);
+          }),
+        );
+
+      command
+        .command('use')
+        .argument('<site>', 'the Jira site')
+        .argument('<email>', 'an account signed in to it on this machine')
+        .option('--global', 'make it the default for every root on this machine, not only the account this root uses')
+        .description('choose which kept sign-in a site uses, for this root or as the default for every root')
+        .action(
+          action(async (site: string, email: string, options: { global?: boolean }) => {
+            await api.use(site, email, options.global === true);
+            print(`${siteKey(site)} signs in as ${email} ${options.global ? 'by default on this machine' : 'in this root'}.`);
           }),
         );
 
@@ -672,14 +701,10 @@ const entry: CliEntry = {
             const starts = operation === 'set' && (['types', 'priorities', 'link_types', 'fields'] as string[]).includes(part) && connection.mapping[part as MappingPart] === undefined;
             const known = [...MAPPING_PARTS, 'parent', 'transition_fields', 'create.types', 'create.fields'];
             if (!known.includes(part)) throw new Error(`a part is one of ${known.join(', ')}`);
-            const { problems } = await api.setPair(
-              connection.name,
-              part as Parameters<JiraApi['setPair']>[1],
-              from ?? '',
-              unset ? null : part === 'parent' ? (from ?? '') : (to ?? ''),
-              types,
-              { ...(options.push ? { push: true } : {}), ...(options.owner ? { owner: options.owner as 'jira' | 'eidos' } : {}) },
-            );
+            const { problems } = await api.setPair(connection.name, part as Parameters<JiraApi['setPair']>[1], from ?? '', unset ? null : part === 'parent' ? (from ?? '') : (to ?? ''), types, {
+              ...(options.push ? { push: true } : {}),
+              ...(options.owner ? { owner: options.owner as 'jira' | 'eidos' } : {}),
+            });
             const scope = types.length > 0 ? ` (${types.join(', ')})` : '';
             print(`${connection.name}: ${part} ${operation === 'set' ? `${from} → ${part === 'parent' ? '' : to}${scope}` : `${from ?? ''}${scope} unset`}`.trim());
             for (const problem of problems) print(`  jira/${problem.code}: ${problem.message}`);
@@ -747,17 +772,17 @@ const entry: CliEntry = {
       command
         .command('sync')
         .argument('[tasks...]', 'tasks by their id or their issue key')
-        .option('--connection <name>', "every task of a connection edited here since its last pull or sync, one issue at a time")
+        .option('--connection <name>', 'every task of a connection edited here since its last pull or sync, one issue at a time')
         .option('--dry-run', 'show what it would do and write nothing')
-        .option('--take <side=jira|eidos>', 'settle a field changed on both sides: its side (title, status, section:description, or all) to Jira\'s value or the task\'s', collect)
+        .option('--take <side=jira|eidos>', "settle a field changed on both sides: its side (title, status, section:description, or all) to Jira's value or the task's", collect)
         .option('--accept-loss <side>', 'write a text field though Jira loses what markdown cannot hold (a panel, a file); `all` for every field', collect)
-        .option('--status-to <status>', 'the Jira status to go to when several read as the task\'s status')
+        .option('--status-to <status>', "the Jira status to go to when several read as the task's status")
         .option('--via <statuses>', 'Jira statuses to pass through, comma-separated, when the status asked for is more than one transition away')
         .option('--field <field=value>', "a value a transition's screen asks for (resolution=Done)", collect)
         .option('--no-comments', "leave your messages in the issue's thread unsent")
         .option('--yes', 'sync without asking, once nothing is left to settle')
         .option('--json', 'print as JSON')
-        .description("bring a task and its Jira issue level, field by field: what changed in Jira comes in, what changed here goes out, and what changed in both is yours to settle first")
+        .description('bring a task and its Jira issue level, field by field: what changed in Jira comes in, what changed here goes out, and what changed in both is yours to settle first')
         .action(
           action(
             async (
@@ -781,7 +806,14 @@ const entry: CliEntry = {
                 take: take as Record<string, 'jira' | 'eidos'>,
                 acceptLoss: options.acceptLoss ?? [],
                 ...(options.statusTo ? { statusTo: options.statusTo } : {}),
-                ...(options.via ? { via: options.via.split(',').map((status) => status.trim()).filter(Boolean) } : {}),
+                ...(options.via
+                  ? {
+                      via: options.via
+                        .split(',')
+                        .map((status) => status.trim())
+                        .filter(Boolean),
+                    }
+                  : {}),
                 transitionFields: pairsOf(options.field, '--field'),
                 noComments: options.comments === false,
               };
@@ -865,7 +897,7 @@ const entry: CliEntry = {
         .command('create')
         .argument('<tasks...>', 'tasks by their id')
         .requiredOption('--connection <name>', 'the connection whose project the issues are made in')
-        .option('--type <type>', 'the Jira issue type, where several read as the task\'s type')
+        .option('--type <type>', "the Jira issue type, where several read as the task's type")
         .option('--field <field=value>', 'a value for a field Jira requires and the task does not hold', collect)
         .option('--again', 'create anew a task whose earlier create was cut short and whose issue cannot be found')
         .option('--yes', 'create without asking, once nothing is left to settle')

@@ -227,29 +227,64 @@ export function credentials(host: Host, site: string, env: NodeJS.ProcessEnv = p
   return { email: found.email, token };
 }
 
+// `global` makes the account the site's default for every root on this machine, and this root follows it; otherwise
+// it is this root's own pick, the default left as it is.
 export async function saveSignIn(host: Host, site: string, given: Credentials, global: boolean): Promise<void> {
   tokenStore().set(secretKey(site, given.email), given.token);
-  if (global) tokenStore().setAccount(siteKey(site), given.email);
-  else await host.settings().set('accounts', { ...rootAccounts(host), [siteKey(site)]: given.email });
+  await useSignIn(host, site, given.email, global);
 }
 
-// The sign-in for a site taken out of this root and this machine, and its tokens from the file; who was signed out.
-export async function removeSignIn(host: Host, site: string): Promise<string[]> {
+// Every account whose token this machine keeps, by site, beside which one the default is and which one this root picked.
+export function heldSignIns(host: Host): Array<{ site: string; email: string; default: boolean; picked: boolean }> {
+  const root = rootAccounts(host);
+  const machine = machineAccounts();
+  return tokenStore()
+    .keys()
+    .flatMap((key) => {
+      const at = key.indexOf('/');
+      if (at < 0) return [];
+      const site = key.slice(0, at);
+      const email = key.slice(at + 1);
+      return [{ site, email, default: machine[site]?.toLowerCase() === email, picked: root[site]?.toLowerCase() === email }];
+    });
+}
+
+// A kept account chosen for a site: this root's pick, or the default for every root (this root's pick dropped, so it
+// follows the default).
+export async function useSignIn(host: Host, site: string, email: string, global: boolean): Promise<void> {
   const key = siteKey(site);
+  if (!tokenStore().get(secretKey(site, email))) throw new ConnectionError(`no token for ${email} on ${key} is kept here; eidos jira login ${key} --email ${email}`);
+  const root = rootAccounts(host);
+  if (global) {
+    tokenStore().setAccount(key, email);
+    if (key in root) {
+      delete root[key];
+      await host.settings().set('accounts', root);
+    }
+  } else await host.settings().set('accounts', { ...root, [key]: email });
+}
+
+// A site's sign-ins taken out of this root and this machine with their tokens, or only `email`'s when it is given;
+// who was signed out.
+export async function removeSignIn(host: Host, site: string, email?: string): Promise<string[]> {
+  const key = siteKey(site);
+  const only = email?.trim().toLowerCase();
   const out: string[] = [];
   const root = rootAccounts(host);
   const rootEmail = root[key];
-  if (rootEmail) {
+  if (rootEmail && (!only || rootEmail.toLowerCase() === only)) {
     tokenStore().delete(secretKey(site, rootEmail));
     delete root[key];
     await host.settings().set('accounts', root);
     out.push(`${rootEmail} (${SCOPE_WORDS.root})`);
   }
   const machineEmail = machineAccounts()[key];
-  if (machineEmail) {
+  if (machineEmail && (!only || machineEmail.toLowerCase() === only)) {
     tokenStore().delete(secretKey(site, machineEmail));
     tokenStore().setAccount(key, null);
     out.push(`${machineEmail} (${SCOPE_WORDS.machine})`);
   }
+  // an account kept but neither picked here nor the default
+  if (only && out.length === 0 && tokenStore().delete(secretKey(site, only))) out.push(only);
   return out;
 }

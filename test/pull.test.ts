@@ -296,6 +296,24 @@ test('Jira REQ15, Jira Pull REQ10: with add_people on, a person the root does no
   await ok(['plugin', 'set', 'jira', 'add_people', 'false']);
 });
 
+test('Jira REQ5: a machine keeps several sign-ins to a site; a root picks one, the default is for the rest, and one is signed out alone', async () => {
+  // a second account's token, as a second login keeps it
+  const held = JSON.parse(readFileSync(TOKENS, 'utf8')) as { accounts: Record<string, string>; tokens: Record<string, string> };
+  writeFileSync(TOKENS, JSON.stringify({ ...held, tokens: { ...held.tokens, [`${fake.url}/second@example.com`]: 'second-token' } }));
+  await ok(['jira', 'use', fake.url, 'second@example.com', '--global']);
+  assert.match(await ok(['jira', 'whoami']), /second@example.com, kept for this machine/, "the default, this root's own pick dropped");
+  await ok(['jira', 'use', fake.url, EMAIL]);
+  assert.match(await ok(['jira', 'whoami']), /tester@example.com, kept for this root/, "this root's pick before the default");
+  const refused = await eidos(['jira', 'use', fake.url, 'nobody@example.com']);
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /no token for nobody@example.com/);
+  assert.match(await ok(['jira', 'logout', fake.url, '--email', 'second@example.com']), /second@example.com/);
+  const after = JSON.parse(readFileSync(TOKENS, 'utf8')) as { accounts: Record<string, string>; tokens: Record<string, string> };
+  assert.deepEqual(Object.keys(after.tokens), [`${fake.url}/${EMAIL}`]);
+  assert.deepEqual(after.accounts, {}, 'the default went with it');
+  assert.match(await ok(['jira', 'whoami']), /tester@example.com, kept for this root/);
+});
+
 test('Jira REQ5: logout takes the sign-in and its token out', async () => {
   assert.match(await ok(['jira', 'logout', fake.url]), /Signed out/);
   assert.deepEqual(JSON.parse(readFileSync(TOKENS, 'utf8')).tokens, {});

@@ -51,6 +51,8 @@ function write(file: string, held: Held): void {
 export interface TokenStore {
   readonly where: string;
   get(key: string): string | null;
+  // every key a token is kept under
+  keys(): string[];
   set(key: string, token: string): void;
   delete(key: string): boolean;
   // the email each site signs in with on every root of this machine
@@ -63,6 +65,7 @@ export function tokenStore(env: NodeJS.ProcessEnv = process.env): TokenStore {
   return {
     where: file,
     get: (key) => read(file).tokens[key] ?? null,
+    keys: () => Object.keys(read(file).tokens),
     set: (key, token) => {
       const held = read(file);
       write(file, { ...held, tokens: { ...held.tokens, [key]: token } });

@@ -1,10 +1,11 @@
 // The Jira plugin's page half (The Plugin Model REQ49), drawn with the kit the
 // Eidos MD page hands a plugin (`eidosmd/page`) and laid out with its Stack,
-// Row, and Text, never with utility classes. Two things: a Jira activity in
-// the Activity Bar whose sidebar fetches and pulls each board, and the
-// plugin's own settings page in place of the host's form (signing in,
-// connecting a board by pasting its address, the mapping review, and the
-// options). Each answers through the plugin's own routes.
+// Row, and Text, never with utility classes. Three things: a Jira activity in
+// the Activity Bar whose sidebar fetches and pulls each board, the plugin's
+// own settings page in place of the host's form (signing in, connecting a
+// board by pasting its address, and the options), and a page of its own per
+// board for its mapping, at /p/jira/mapping/<board>. Each answers through the
+// plugin's own routes.
 import { useCallback, useEffect, useRef, useState, type JSX, type MutableRefObject } from 'react';
 import {
   Badge,
@@ -17,6 +18,10 @@ import {
   NavFootLink,
   NavHead,
   Notice,
+  Page,
+  PageHead,
+  PageText,
+  PageTitle,
   Row,
   Seg,
   SegItem,
@@ -55,8 +60,16 @@ interface ConnectionRow {
   // the tasks edited here since their last pull or sync, and the creates and syncs cut short
   sync: { edited: Array<{ task: string; key: string; sides: string[] }>; pending: string[]; interrupted: Array<{ key: string; at: string }> } | null;
 }
+// an account whose token this machine keeps
+interface HeldRow {
+  site: string;
+  email: string;
+  default: boolean;
+  picked: boolean;
+}
 interface State {
   sign_ins: SignInRow[];
+  held: HeldRow[];
   connections: ConnectionRow[];
   settings: { pull_attachments: boolean; add_people: boolean; auto_fetch: string };
 }
@@ -402,10 +415,10 @@ function SyncReview(props: { task: string; onClose: () => void; onSynced: () => 
                 </Text>
                 {field.verdict === 'conflict' && (
                   <Seg>
-                    <SegItem active={choices.take[field.side] === 'jira'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'jira' } })}>
+                    <SegItem selected={choices.take[field.side] === 'jira'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'jira' } })}>
                       {t('keepJira')}
                     </SegItem>
-                    <SegItem active={choices.take[field.side] === 'eidos'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'eidos' } })}>
+                    <SegItem selected={choices.take[field.side] === 'eidos'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'eidos' } })}>
                       {t('keepMine')}
                     </SegItem>
                   </Seg>
@@ -525,7 +538,6 @@ function JiraSettings(): JSX.Element {
   const host = usePluginHost();
   const { state, setState } = useJiraState();
   const { busy, act } = useActions(host);
-  const [mapping, setMapping] = useState<string | null>(null);
   const take = (answer: { state: State }): void => setState(answer.state);
   if (!state)
     return (
@@ -537,12 +549,13 @@ function JiraSettings(): JSX.Element {
   return (
     <Stack gap="lg" data-testid="jira-settings">
       <Account state={state} busy={busy} act={act} take={take} />
-      <Boards state={state} busy={busy} act={act} take={take} onMap={setMapping} />
+      <Boards state={state} busy={busy} act={act} take={take} onMap={(name) => host.navigate(mappingHref(host, name))} />
       <Options state={state} act={act} take={take} />
-      {mapping && <Mapping name={mapping} onClose={() => setMapping(null)} onSaved={take} />}
     </Stack>
   );
 }
+
+const mappingHref = (host: PluginHost, name: string): string => host.hrefs.page(`mapping/${encodeURIComponent(name)}`);
 
 type Act = <T>(key: string, work: () => Promise<T>, done?: (value: T) => void) => Promise<void>;
 
@@ -564,28 +577,74 @@ function Account(props: { state: State; busy: string | null; act: Act; take: (an
         host.toast(t('signedIn', { name: answer.signed.name }), 'success', answer.signed.site);
       },
     );
+  // the site's sign-in in use here, from the environment, this root's pick, or the default
+  const inUse = (site: string): SignInRow | undefined => props.state.sign_ins.find((row) => row.site === site);
+  const choose = (row: HeldRow, global: boolean): void =>
+    void props.act(`use:${row.site}/${row.email}`, () => host.post<{ state: State }>('use', { site: row.site, email: row.email, global }), props.take);
+  const signOut = async (row: HeldRow): Promise<void> => {
+    if (!(await host.dialog.confirm(t('signOutAsk', { email: row.email, site: row.site }), { title: t('signOutTitle'), ok: t('signOut'), danger: true }))) return;
+    await props.act(`logout:${row.site}/${row.email}`, () => host.post<{ state: State }>('logout', { site: row.site, email: row.email }), props.take);
+  };
+  // what the kept accounts do not show: a sign-in the environment gives, one picked whose token is gone, and a site a
+  // connection names with no account kept for it
+  const keptFor = (row: SignInRow): boolean => props.state.held.some((held) => held.site === row.site && (row.email === null || held.email === row.email.toLowerCase()));
+  const unheld = props.state.sign_ins.filter((row) => row.scope === 'environment' || !keptFor(row));
+  const unheldHint = (row: SignInRow): string => {
+    if (row.scope === 'environment') return t('fromEnvironment', { site: row.site });
+    if (row.email) return t('tokenGone', { site: row.site });
+    return t('nobodySignedIn', { site: row.site });
+  };
   return (
     <Stack gap="xs">
       <SettingsHead>{t('account')}</SettingsHead>
       <Card variant="grouped">
-        {props.state.sign_ins.map((row) => (
+        {unheld.map((row) => (
           <SettingRow
-            key={row.site}
-            label={row.site}
-            hint={row.email ? t('signedInAs', { email: row.email, kept: row.kept ?? '' }) : t('nobodySignedIn')}
-            badge={row.email ? <Badge tone="ok">{t('signedInBadge')}</Badge> : null}
-            control={
-              row.email && row.scope !== 'environment' ? (
-                <Button
-                  disabled={props.busy === `logout:${row.site}`}
-                  onClick={() => void props.act(`logout:${row.site}`, () => host.post<{ state: State }>('logout', { site: row.site }), props.take)}
-                >
-                  {t('signOut')}
-                </Button>
-              ) : null
-            }
+            key={`${row.site}:${row.scope ?? 'none'}`}
+            label={row.email ?? row.site}
+            hint={unheldHint(row)}
+            badge={row.scope === 'environment' ? <Badge tone="ok">{t('inUseHere')}</Badge> : null}
           />
         ))}
+        {props.state.held.map((row) => {
+          const using = inUse(row.site);
+          const here = using?.scope !== 'environment' && using?.email?.toLowerCase() === row.email;
+          const key = `${row.site}/${row.email}`;
+          let hint = t('keptOnly', { site: row.site });
+          if (row.picked) hint = t('pickedHere', { site: row.site });
+          else if (row.default) hint = t('defaultEverywhere', { site: row.site });
+          return (
+            <SettingRow
+              key={key}
+              data-testid={`jira-sign-in-${row.email}`}
+              label={row.email}
+              hint={hint}
+              badge={
+                <Row gap="xs">
+                  {here ? <Badge tone="ok">{t('inUseHere')}</Badge> : null}
+                  {row.default ? <Badge>{t('defaultBadge')}</Badge> : null}
+                </Row>
+              }
+              control={
+                <Row>
+                  {!here && (
+                    <Button disabled={props.busy !== null} onClick={() => choose(row, false)}>
+                      {t('useHere')}
+                    </Button>
+                  )}
+                  {!row.default && (
+                    <Button disabled={props.busy !== null} onClick={() => choose(row, true)}>
+                      {t('makeDefault')}
+                    </Button>
+                  )}
+                  <Button variant="quiet" disabled={props.busy !== null} onClick={() => void signOut(row)}>
+                    {t('signOut')}
+                  </Button>
+                </Row>
+              }
+            />
+          );
+        })}
         <SettingRow
           stacked
           label={t('signInTitle')}
@@ -606,6 +665,9 @@ function Account(props: { state: State; busy: string | null; act: Act; take: (an
                 <Switch checked={global} aria-label={t('everyRoot')} onChange={(event: { currentTarget: HTMLInputElement }) => setGlobal(event.currentTarget.checked)} />
                 <Text size="sm">{t('everyRoot')}</Text>
               </Row>
+              <Text size="xs" tone="faint" block>
+                {t(global ? 'everyRootOn' : 'everyRootOff')}
+              </Text>
               <Row>
                 <Button variant="primary" disabled={props.busy === 'login' || !email.trim() || !token.trim() || !(site.trim() || known)} onClick={signIn} data-testid="jira-sign-in">
                   {t(props.busy === 'login' ? 'signingIn' : 'signIn')}
@@ -694,14 +756,17 @@ function Boards(props: { state: State; busy: string | null; act: Act; take: (ans
   );
 }
 
-// The mapping editor (Jira REQ12): every value Jira holds beside the Backlog value it maps to, the held pair or a
-// suggestion first, each changeable; fields per issue type, with a property made on the spot for a field none fits.
-// While Jira is read, each stage of the read is shown as it starts.
-function Mapping(props: { name: string; onClose: () => void; onSaved: (answer: { state: State }) => void }): JSX.Element {
+// The mapping editor (Jira REQ12), a page of its own for a board: every value Jira holds beside the Backlog value it
+// maps to, the held pair or a suggestion first, each changeable; fields per issue type, with a property made on the
+// spot for a field none fits. While Jira is read, each stage of the read is shown as it starts. Leaving or reading Jira
+// again with changes unsaved asks first.
+function MappingPage(props: { name: string }): JSX.Element {
   const host = usePluginHost();
   const { t } = host;
   const [model, setModel] = useState<Model | null>(null);
   const [chosen, setChosen] = useState<Choice | null>(null);
+  // the mapping as last read or saved, to tell what is unsaved
+  const [saved, setSaved] = useState<Choice | null>(null);
   const [stages, setStages] = useState<Stage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('statuses');
@@ -716,6 +781,7 @@ function Mapping(props: { name: string; onClose: () => void; onSaved: (answer: {
         (next) => {
           setModel(next);
           setChosen(next.chosen);
+          setSaved(next.chosen);
         },
         (cause) => setError(reason(cause)),
       );
@@ -727,16 +793,23 @@ function Mapping(props: { name: string; onClose: () => void; onSaved: (answer: {
     const stage = payload as Stage & { connection?: string };
     if (stage.connection === props.name) setStages((held) => [...held, stage]);
   });
+  const unsaved = chosen !== null && saved !== null && JSON.stringify(chosen) !== JSON.stringify(saved);
+  const leaveUnsaved = async (): Promise<boolean> => !unsaved || host.dialog.confirm(t('unsavedAsk'), { title: t('unsavedTitle'), ok: t('discard'), danger: true });
+  const back = async (): Promise<void> => {
+    if (await leaveUnsaved()) host.navigate('/plugins/jira');
+  };
+  const readAgain = async (): Promise<void> => {
+    if (await leaveUnsaved()) read(true);
+  };
 
   const save = async (): Promise<void> => {
     if (!chosen) return;
     setSaving(true);
     try {
       const answer = await host.put<{ problems: Array<{ message: string }>; state: State }>('mapping', { name: props.name, mapping: chosen });
-      props.onSaved(answer);
+      setSaved(chosen);
       if (answer.problems.length > 0) host.toast(t('mappingProblems', { n: answer.problems.length }), 'error', answer.problems[0]!.message);
       else host.toast(t('mappingSaved'), 'success', props.name);
-      props.onClose();
     } catch (cause) {
       host.toast(t('failed'), 'error', reason(cause));
     } finally {
@@ -747,69 +820,59 @@ function Mapping(props: { name: string; onClose: () => void; onSaved: (answer: {
   let body: JSX.Element;
   if (error) body = <Notice>{error}</Notice>;
   else if (!model || !chosen) body = <Reading stages={stages} />;
-  else
-    body = (
-      <Stack gap="md">
-        <Notice>
-          <Stack gap="xs">
-            <Text size="sm" block>
-              {t('backlogFirst')}
-            </Text>
+  else if (tab === 'fields') body = <Fields model={model} chosen={chosen} setChosen={setChosen} setModel={setModel} connection={props.name} />;
+  else body = <Values tab={tab} model={model} chosen={chosen} setChosen={setChosen} />;
+  return (
+    <Page width="narrow" data-testid="jira-mapping">
+      <PageHead sticky>
+        <Stack gap="sm">
+          <Row>
+            <Button size="sm" variant="quiet" onClick={() => void back()}>
+              {t('backToSettings')}
+            </Button>
+          </Row>
+          <Row justify="between" align="start" wrap>
+            <Stack gap="none">
+              <PageTitle>{t('mappingTitle', { name: props.name })}</PageTitle>
+              <PageText>
+                {model ? t('readFrom', { date: new Date(model.read).toLocaleString() }) : t('readingBoard')}
+                {unsaved ? ` · ${t('unsaved')}` : ''}
+              </PageText>
+            </Stack>
             <Row>
+              <Button variant="quiet" disabled={!model} onClick={() => void readAgain()}>
+                {t('readAgain')}
+              </Button>
+              <Button variant="primary" disabled={saving || !unsaved} onClick={() => void save()} data-testid="jira-save-mapping">
+                {t(saving ? 'savingMapping' : 'saveMapping')}
+              </Button>
+            </Row>
+          </Row>
+          {model && (
+            <Seg data-testid="jira-mapping-parts">
+              {TABS.map((each) => (
+                <SegItem key={each} selected={tab === each} aria-pressed={tab === each} onClick={() => setTab(each)}>
+                  {t(`part_${each}`)}
+                </SegItem>
+              ))}
+            </Seg>
+          )}
+        </Stack>
+      </PageHead>
+      <Stack gap="md">
+        {model && (
+          <Notice>
+            <Row justify="between" wrap>
+              <Text size="sm">{t('backlogFirst')}</Text>
               <Button size="sm" onClick={() => host.navigate('/plugins/backlog')}>
                 {t('openBacklog')}
               </Button>
             </Row>
-          </Stack>
-        </Notice>
-        {tab === 'fields' ? (
-          <Fields model={model} chosen={chosen} setChosen={setChosen} setModel={setModel} connection={props.name} />
-        ) : (
-          <Values tab={tab} model={model} chosen={chosen} setChosen={setChosen} />
+          </Notice>
         )}
+        {body}
       </Stack>
-    );
-  return (
-    <Modal
-      size="lg"
-      title={t('mappingTitle', { name: props.name })}
-      onClose={props.onClose}
-      head={
-        model ? (
-          <Seg>
-            {TABS.map((each) => (
-              <SegItem key={each} active={tab === each} onClick={() => setTab(each)}>
-                {t(`part_${each}`)}
-              </SegItem>
-            ))}
-          </Seg>
-        ) : null
-      }
-      foot={
-        <Row justify="between">
-          <Row>
-            {model && (
-              <Text size="xs" tone="faint">
-                {t('readFrom', { date: new Date(model.read).toLocaleString() })}
-              </Text>
-            )}
-            <Button size="sm" variant="quiet" disabled={!model} onClick={() => read(true)}>
-              {t('readAgain')}
-            </Button>
-          </Row>
-          <Row>
-            <Button variant="quiet" onClick={props.onClose}>
-              {t('cancel')}
-            </Button>
-            <Button variant="primary" disabled={saving || !model || !chosen} onClick={() => void save()} data-testid="jira-save-mapping">
-              {t(saving ? 'savingMapping' : 'saveMapping')}
-            </Button>
-          </Row>
-        </Row>
-      }
-    >
-      <Card variant="home">{body}</Card>
-    </Modal>
+    </Page>
   );
 }
 
@@ -1117,6 +1180,7 @@ export const page: PagePlugin = {
   name: 'jira',
   strings: JIRA_STRINGS,
   views: [{ sector: 'primary', name: 'boards', title: 'Jira', icon: JiraIcon, render: () => <JiraView /> }],
+  pages: [{ path: 'mapping', render: (route: { segments: string[] }) => <MappingPage key={route.segments[0] ?? ''} name={decodeURIComponent(route.segments[0] ?? '')} /> }],
   settings: () => <JiraSettings />,
   settingsDrawn: ['connections', 'accounts', 'pull_attachments', 'add_people', 'auto_fetch'],
 };

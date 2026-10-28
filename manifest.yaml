@@ -1,7 +1,7 @@
 # The Jira plugin's manifest, read by the host before any of its code runs.
 name: jira
 title: Jira
-description: Pull a Jira Cloud board's issues into the Backlog as tasks, and their comments as threads signed by the people who wrote them
+description: Pull a Jira Cloud board's issues into the Backlog as tasks, and their comments as threads signed by the people who wrote them; sync a task's changes back, or make an issue from a task, one at a time when you ask
 version: 0.1.1
 min_host: 0.16.1
 requires:

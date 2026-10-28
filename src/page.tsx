@@ -52,6 +52,8 @@ interface ConnectionRow {
   mapping: Record<string, Pair[] | string | undefined>;
   problems: Array<{ code: string; message: string }>;
   status: { last_pull: string | null; last_fetch: { at: string; count: number; error?: string } | null } | null;
+  // the tasks edited here since their last pull or sync, and the creates and syncs cut short
+  sync: { edited: Array<{ task: string; key: string; sides: string[] }>; pending: string[]; interrupted: Array<{ key: string; at: string }> } | null;
 }
 interface State {
   sign_ins: SignInRow[];
@@ -103,6 +105,27 @@ interface Done {
   added: number;
   changed: number;
   comments: { added: number; changed: number; removed: number };
+}
+
+// what the plugin's `sync-plan` route answers (its SyncPlan)
+interface SyncPlanView {
+  task: string;
+  key: string;
+  url: string;
+  fields: Array<{ side: string; jira: string; verdict: 'unchanged' | 'from-jira' | 'to-jira' | 'same' | 'conflict'; eidos: string; remote: string; seen: string; reason?: string; kept?: boolean }>;
+  status: { from: string; to: string; path: string[] } | null;
+  comments: Array<{ index: number; text: string }>;
+  blockers: Array<{ side: string | null; code: string; message: string; fix: string; ask?: { kind: 'status_to' | 'via' | 'field'; field?: string; choices: string[] } }>;
+  loss: Record<string, Array<{ kind: string; count: number }>>;
+  level: boolean;
+}
+// what a review settles, sent with every plan it asks for and with the sync
+interface SyncChoices {
+  take: Record<string, 'jira' | 'eidos'>;
+  accept_loss: string[];
+  status_to?: string;
+  via?: string[];
+  fields: Record<string, string>;
 }
 
 const PARTS = ['types', 'statuses', 'priorities', 'link_types', 'fields'] as const;
@@ -177,6 +200,7 @@ function JiraView(): JSX.Element {
   const { state, reload } = useJiraState();
   const { busy, act } = useActions(host);
   const [found, setFound] = useState<Record<string, number>>({});
+  const [reviewing, setReviewing] = useState<string | null>(null);
   const fetchOne = (name: string): Promise<void> =>
     act(
       `fetch:${name}`,
@@ -247,6 +271,28 @@ function JiraView(): JSX.Element {
                 <Text size="xs" tone="faint" block>
                   {connection.status?.last_pull ? t('lastPull', { date: new Date(connection.status.last_pull).toLocaleString() }) : t('neverPulled')}
                 </Text>
+                {(connection.sync?.edited.length ?? 0) > 0 && (
+                  <Stack gap="xs" data-testid={`jira-edited-${connection.name}`}>
+                    <Text size="xs" tone="muted" block>
+                      {t('editedHere', { n: connection.sync!.edited.length })}
+                    </Text>
+                    {connection.sync!.edited.map((edited) => (
+                      <Row key={edited.task}>
+                        <Text size="sm" grow>
+                          {edited.key}
+                        </Text>
+                        <Button size="sm" variant="quiet" disabled={busy !== null} onClick={() => setReviewing(edited.task)}>
+                          {t('review')}
+                        </Button>
+                      </Row>
+                    ))}
+                  </Stack>
+                )}
+                {(connection.sync?.interrupted ?? []).map((cut) => (
+                  <Text key={cut.key} size="xs" tone="error" block>
+                    {t('syncCutShort', { key: cut.key })}
+                  </Text>
+                ))}
                 <Row>
                   <Button size="sm" disabled={busy !== null} onClick={() => void fetchOne(connection.name)}>
                     {t(busy === `fetch:${connection.name}` ? 'fetching' : 'fetch')}
@@ -267,10 +313,209 @@ function JiraView(): JSX.Element {
         <b>{t('manifestTitle')}</b>
       </NavHead>
       {body}
+      {reviewing && (
+        <SyncReview
+          task={reviewing}
+          onClose={() => setReviewing(null)}
+          onSynced={() => {
+            setReviewing(null);
+            reload();
+          }}
+        />
+      )}
       <NavFoot>
         <NavFootLink onClick={() => host.navigate('/plugins/jira')}>{t('openSettings')}</NavFootLink>
       </NavFoot>
     </Nav>
+  );
+}
+
+// ---- the sync review --------------------------------------------------------------------
+
+// One task's sync as the person reviews it (Jira Sync REQ3, REQ4): each field that moves, a side chosen for each
+// conflict, a status or a screen's value chosen where the sync asks, a loss agreed to, and Sync once nothing is left.
+function SyncReview(props: { task: string; onClose: () => void; onSynced: () => void }): JSX.Element {
+  const host = usePluginHost();
+  const hostRef = useHostRef(host);
+  const { t } = host;
+  const [choices, setChoices] = useState<SyncChoices>({ take: {}, accept_loss: [], fields: {} });
+  const [plan, setPlan] = useState<SyncPlanView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  // read again after a refused sync, so what Jira changed meanwhile is shown to settle
+  const [round, setRound] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setError(null);
+    hostRef.current.post<SyncPlanView>('sync-plan', { task: props.task, options: choices }).then(
+      (next) => {
+        if (live) setPlan(next);
+      },
+      (cause) => {
+        if (live) setError(reason(cause));
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [hostRef, props.task, choices, round]);
+  const sync = async (): Promise<void> => {
+    setSyncing(true);
+    try {
+      // what this review read of Jira goes with it, so a field Jira changed meanwhile stops the sync instead of being written over
+      await host.post('sync', { task: props.task, options: { ...choices, expect: Object.fromEntries((plan?.fields ?? []).map((field) => [field.side, field.seen])) } });
+      host.toast(t('syncedTitle', { key: plan?.key ?? props.task }), 'success');
+      props.onSynced();
+    } catch (cause) {
+      host.toast(t('failed'), 'error', reason(cause));
+      setRound((held) => held + 1);
+    } finally {
+      setSyncing(false);
+    }
+  };
+  const arrow: Record<SyncPlanView['fields'][number]['verdict'], string> = { unchanged: '', 'from-jira': '←', 'to-jira': '→', same: '=', conflict: '!' };
+  let body: JSX.Element;
+  if (error) body = <Notice>{error}</Notice>;
+  else if (!plan)
+    body = (
+      <Stack pad="sm">
+        <SkeletonBar width="70%" />
+        <SkeletonBar width="50%" />
+      </Stack>
+    );
+  else
+    body = (
+      <Stack gap="sm">
+        {plan.level && (
+          <Text size="sm" tone="muted" block>
+            {t('syncLevel')}
+          </Text>
+        )}
+        {plan.fields
+          .filter((field) => field.verdict !== 'unchanged')
+          .map((field) => (
+            <Stack key={field.side} gap="xs">
+              <Row>
+                <Text weight="strong">{arrow[field.verdict]}</Text>
+                <Text size="sm" grow>
+                  {field.side}
+                </Text>
+                {field.verdict === 'conflict' && (
+                  <Seg>
+                    <SegItem active={choices.take[field.side] === 'jira'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'jira' } })}>
+                      {t('keepJira')}
+                    </SegItem>
+                    <SegItem active={choices.take[field.side] === 'eidos'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'eidos' } })}>
+                      {t('keepMine')}
+                    </SegItem>
+                  </Seg>
+                )}
+              </Row>
+              <Text size="xs" tone="faint" block>
+                {field.verdict === 'from-jira' && t('fromJira', { value: field.remote })}
+                {field.verdict === 'to-jira' && (field.kept ? t('keptHere', { reason: field.reason ?? '' }) : t('toJira', { value: field.eidos }))}
+                {field.verdict === 'same' && t('sameBoth')}
+                {field.verdict === 'conflict' && t('bothChanged', { here: field.eidos, jira: field.remote })}
+              </Text>
+            </Stack>
+          ))}
+        {plan.status && (
+          <Text size="sm" block>
+            {t('statusPath', { path: [plan.status.from, ...plan.status.path].join(' → ') })}
+          </Text>
+        )}
+        {plan.comments.map((comment) => (
+          <Text key={comment.index} size="sm" block>
+            {t('sendsComment', { text: comment.text })}
+          </Text>
+        ))}
+        {plan.blockers
+          .filter((blocker) => blocker.code !== 'conflict' && blocker.code !== 'unrecorded')
+          .map((blocker) => (
+            <Notice key={blocker.message}>
+              <Stack gap="xs">
+                <Text size="sm" block>
+                  {blocker.message}
+                </Text>
+                {blocker.code === 'loss' && blocker.side && (
+                  <Row>
+                    <Switch
+                      checked={choices.accept_loss.includes(blocker.side)}
+                      aria-label={t('acceptLoss')}
+                      onChange={(event: { currentTarget: HTMLInputElement }) =>
+                        setChoices({
+                          ...choices,
+                          accept_loss: event.currentTarget.checked ? [...choices.accept_loss, blocker.side!] : choices.accept_loss.filter((side) => side !== blocker.side),
+                        })
+                      }
+                    />
+                    <Text size="sm">{t('acceptLoss')}</Text>
+                  </Row>
+                )}
+                {blocker.ask && blocker.ask.choices.length > 0 ? (
+                  <Select
+                    aria-label={t(`ask_${blocker.ask.kind}`)}
+                    value=""
+                    onChange={(event: { target: HTMLSelectElement }) => {
+                      const value = event.target.value;
+                      if (!value) return;
+                      if (blocker.ask!.kind === 'status_to') setChoices({ ...choices, status_to: value });
+                      else if (blocker.ask!.kind === 'via') setChoices({ ...choices, via: [...(choices.via ?? []), value] });
+                      else setChoices({ ...choices, fields: { ...choices.fields, [blocker.ask!.field ?? '']: value } });
+                    }}
+                  >
+                    <option value="">{t(`ask_${blocker.ask.kind}`)}</option>
+                    {blocker.ask.choices.map((choice) => (
+                      <option key={choice} value={choice}>
+                        {choice}
+                      </option>
+                    ))}
+                  </Select>
+                ) : (
+                  blocker.code !== 'loss' && (
+                    <Text size="xs" tone="faint" block>
+                      {blocker.fix}
+                    </Text>
+                  )
+                )}
+              </Stack>
+            </Notice>
+          ))}
+      </Stack>
+    );
+  const unsettled = plan === null || plan.blockers.length > 0;
+  return (
+    <Modal
+      size="lg"
+      title={t('syncTitle', { key: plan?.key ?? props.task })}
+      onClose={props.onClose}
+      foot={
+        <Row justify="between">
+          <Row>
+            {plan && (
+              <Button size="sm" variant="quiet" onClick={() => window.open(plan.url, '_blank', 'noopener')}>
+                {t('openInJira')}
+              </Button>
+            )}
+            {(choices.via?.length ?? 0) > 0 || choices.status_to ? (
+              <Button size="sm" variant="quiet" onClick={() => setChoices({ ...choices, via: [], status_to: undefined })}>
+                {t('resetStatus')}
+              </Button>
+            ) : null}
+          </Row>
+          <Row>
+            <Button variant="quiet" onClick={props.onClose}>
+              {t('cancel')}
+            </Button>
+            <Button variant="primary" disabled={syncing || unsettled || plan.level} onClick={() => void sync()} data-testid="jira-sync">
+              {t(syncing ? 'syncing' : 'sync')}
+            </Button>
+          </Row>
+        </Row>
+      }
+    >
+      <Card variant="home">{body}</Card>
+    </Modal>
   );
 }
 

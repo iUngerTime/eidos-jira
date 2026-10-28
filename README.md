@@ -6,9 +6,11 @@ Bring your team's Jira board into your Eidos root. Every issue becomes a task in
 - **Your mapping, your words.** Jira's statuses, issue types, priorities, and fields map onto your Backlog's. The plugin drafts the mapping and you accept or change each entry.
 - **Comments, signed and dated.** Each issue's comments arrive as one thread on its task, signed by the people who wrote them, dated when they wrote them, with their mentions, formatting, and screenshots.
 - **Safe to pull again.** Jira wins on the fields you map. A field you edited in Eidos is named before a pull overwrites it, and everything the mapping leaves alone (your notes, checklists, the blueprints a task serves, replies written in Eidos) is never touched.
-- **Private by design.** It runs on your machine and talks straight to your Jira site with your own API token. There is no server in between, and nothing is sent back to Jira.
+- **Send your changes back, one ticket at a time.** `sync` brings a task and its issue level field by field: what changed in Jira comes in, what you changed goes out, and anything changed on both sides waits for you to choose. You see the whole plan first, and nothing is written over unseen.
+- **Make a ticket from a task.** `create` shows the issue it would make, then makes it and links the task, so a sync carries it from then on.
+- **Private by design.** It runs on your machine and talks straight to your Jira site with your own API token. There is no server in between, and nothing goes to Jira unless you ask.
 
-Pull only for now: changes go from Jira to Eidos. Needs Eidos MD 0.16.1 or later.
+Needs Eidos MD 0.16.1 or later.
 
 ## Get started
 
@@ -48,6 +50,34 @@ Pull only for now: changes go from Jira to Eidos. Needs Eidos MD 0.16.1 or later
    ```
 
 Signing in and connecting happen in the terminal for now; a settings page in the app is coming. `eidos instructions jira` prints the full guide, every command with its `--json` output, for you or an AI agent working in the root.
+
+## Send changes back
+
+```bash
+eidos jira status
+```
+
+lists the tasks you edited since their last pull or sync, without asking Jira. Then, for one of them:
+
+```bash
+eidos jira sync T-ACME-123 --dry-run
+```
+
+shows what would happen: `←` from Jira, `→` to Jira, `!` changed on both sides, `✗` what stops it and how to fix it. Run it again without `--dry-run` to confirm in the terminal (or with `--yes` from a script).
+
+- **Conflicts are yours to settle.** A field changed in both places stops that ticket until you pick a side (`--take status=eidos`, or answer the prompt).
+- **Statuses go through your workflow.** A sync uses Jira's transitions, asks for what a transition screen needs (`--field resolution=Done`), and never picks between statuses your mapping folds together (Done, Live, Canceled) without you (`--status-to`). A status more than one step away is named with where Jira can go (`--via`).
+- **Rich text survives.** A description goes back with every paragraph you did not touch exactly as Jira holds it, panels, mentions, and screenshots included. A rewrite that would drop one of those says so and waits for `--accept-loss`.
+- **Only your comments.** New replies you write in the issue's thread are sent as your account; nobody else's are. `eidos jira comment T-ACME-123 "…"` comments on a ticket with no thread yet.
+- **Owned fields.** Mark a field as Eidos's (`eidos jira configure:map acme set fields summary title --owner eidos`) and a pull never overwrites it; a change made to it in Jira becomes a conflict at the next sync.
+
+To make a ticket from a task:
+
+```bash
+eidos jira create T-12 --connection acme --type Story
+```
+
+It shows the plan first and makes nothing while something stops it (a required field, an issue type it cannot tell). A create cut short is found again by a mark on the issue, never made twice.
 
 ## What a pull writes
 

@@ -24,6 +24,8 @@ export interface JiraField {
   custom?: string;
   system?: string;
   required: boolean;
+  // Jira fills it when a create leaves it out (a Bug's reporter, the caller)
+  defaulted?: boolean;
   allowed?: string[];
 }
 
@@ -122,6 +124,7 @@ export async function readDescription(client: Requester, connection: Connection,
       key?: string;
       name: string;
       required?: boolean;
+      hasDefaultValue?: boolean;
       schema?: { type?: string; items?: string; custom?: string; system?: string };
       allowedValues?: Array<{ name?: string; value?: string }>;
     }>(client, `/rest/api/3/issue/createmeta/${encodeURIComponent(connection.project)}/issuetypes/${type.id}`, {}, 'fields');
@@ -142,6 +145,7 @@ export async function readDescription(client: Requester, connection: Connection,
           ...(field.schema?.custom ? { custom: field.schema.custom } : {}),
           ...(field.schema?.system ? { system: field.schema.system } : {}),
           required: field.required === true,
+          ...(field.hasDefaultValue === true ? { defaulted: true } : {}),
           ...(allowed.length > 0 ? { allowed } : {}),
         };
       }),

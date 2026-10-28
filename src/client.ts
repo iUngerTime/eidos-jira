@@ -35,6 +35,8 @@ export function siteBase(site: string): string {
 export interface Requester {
   get<T>(path: string, query?: Record<string, string | number | undefined>): Promise<T>;
   post<T>(path: string, body: unknown): Promise<T>;
+  // an edit Jira answers with no body (204), the issue edit and a transition among them
+  put(path: string, body: unknown, query?: Record<string, string | number | undefined>): Promise<void>;
   bytes(url: string): Promise<Uint8Array>;
 }
 
@@ -73,7 +75,14 @@ export function jiraClient(site: string, credentials: Credentials, label: string
 
   return {
     get: async <T>(path: string, query?: Record<string, string | number | undefined>): Promise<T> => (await send('GET', address(path, query))).json() as Promise<T>,
-    post: async <T>(path: string, body: unknown): Promise<T> => (await send('POST', address(path), body)).json() as Promise<T>,
+    post: async <T>(path: string, body: unknown): Promise<T> => {
+      const response = await send('POST', address(path), body);
+      const text = await response.text();
+      return (text === '' ? null : JSON.parse(text)) as T;
+    },
+    put: async (path: string, body: unknown, query?: Record<string, string | number | undefined>): Promise<void> => {
+      await (await send('PUT', address(path, query), body)).text();
+    },
     bytes: async (url: string): Promise<Uint8Array> => {
       // an attachment is read from the site itself, never from an address that points elsewhere
       const target = new URL(url, base);

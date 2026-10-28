@@ -24,23 +24,41 @@ const NONE: AdfContext = { mention: () => null, media: () => null };
 
 const str = (value: unknown): string => (typeof value === 'string' ? value : '');
 
+// Jira's plain text as markdown that reads back as the same text: a backslash, an asterisk, a backtick, a doubled
+// tilde, and an underscore that is not inside a word escaped, so `2*3*4` stays text where markdown would make it emphasis.
+const escapeText = (text: string): string =>
+  text
+    .replace(/\\/g, '\\\\')
+    .replace(/([*`])/g, '\\$1')
+    .replace(/~~/g, '\\~\\~')
+    .replace(/(^|[^A-Za-z0-9])_|_(?=[^A-Za-z0-9]|$)/g, (match) => match.replace('_', '\\_'));
+
+// A line of a paragraph that markdown would read as something else from its start (a list, a heading, a quote) kept text.
+const escapeLineStart = (line: string): string => line.replace(/^(\d+)([.)] )/, '$1\\$2').replace(/^([-+]) /, '\\$1 ').replace(/^(#{1,6} )/, '\\$1').replace(/^>/, '\\>');
+
 function inline(nodes: AdfNode[] | undefined, context: AdfContext): string {
   return (nodes ?? []).map((node) => inlineNode(node, context)).join('');
 }
 
+// The marks round a run of text, its leading and trailing spaces left outside them, as markdown reads `**bold** next`
+// and not `**bold **next`.
 function marked(text: string, marks: AdfNode['marks']): string {
-  let out = text;
-  if (out === '') return out;
+  if (text === '') return text;
+  const lead = /^\s*/.exec(text)![0];
+  const trail = text.length > lead.length ? /\s*$/.exec(text)![0] : '';
+  let out = text.slice(lead.length, text.length - trail.length);
+  if (out === '') return text;
   const types = new Set((marks ?? []).map((mark) => mark.type));
   if (types.has('code')) out = '`' + out.replace(/`/g, '\\`') + '`';
   else {
+    out = escapeText(out);
     if (types.has('strong')) out = `**${out}**`;
     if (types.has('em')) out = `*${out}*`;
     if (types.has('strike')) out = `~~${out}~~`;
   }
   const link = (marks ?? []).find((mark) => mark.type === 'link');
   if (link) out = `[${out}](${str(link.attrs?.['href'])})`;
-  return out;
+  return lead + out + trail;
 }
 
 function inlineNode(node: AdfNode, context: AdfContext): string {
@@ -114,7 +132,10 @@ function table(node: AdfNode, context: AdfContext): string {
 function block(node: AdfNode, context: AdfContext): string {
   switch (node.type) {
     case 'paragraph':
-      return inline(node.content, context);
+      return inline(node.content, context)
+        .split('\n')
+        .map(escapeLineStart)
+        .join('\n');
     case 'heading': {
       const level = Math.min(Math.max(Number(node.attrs?.['level']) || 1, 1), 6);
       return `${'#'.repeat(level)} ${inline(node.content, context)}`;
@@ -129,7 +150,10 @@ function block(node: AdfNode, context: AdfContext): string {
       return (node.content ?? []).map((item) => `- ${inline(item.content, context)}`).join('\n');
     case 'codeBlock': {
       const text = (node.content ?? []).map((child) => str(child.text)).join('');
-      return '```' + str(node.attrs?.['language']) + '\n' + text + '\n```';
+      // a fence longer than any run of backticks the code holds, so a line of it never closes the block
+      const longest = Math.max(2, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+      const fence = '`'.repeat(longest + 1);
+      return fence + str(node.attrs?.['language']) + '\n' + text + '\n' + fence;
     }
     case 'blockquote':
     case 'panel':

@@ -6,7 +6,7 @@
 // (REQ8). A pair is checked against the Jira field's schema and the Backlog's
 // declarations (REQ9) and against the connection's direction (REQ10).
 import { allFields, allStatuses, type Description, type JiraField } from './describe.ts';
-import type { Connection, Mapping, Pair, ParentRule } from './connections.ts';
+import type { Connection, Mapping, MappingPart, Pair, ParentRule } from './connections.ts';
 import type { BoardSettings, StatusCategory } from './types.ts';
 
 export const DEFAULT_TYPE = 'default';
@@ -70,11 +70,25 @@ export function statusFor(mapping: Mapping, board: BoardSettings, jiraStatus: st
   return board.statuses.find((status) => backlogCategory(board, status) === category) ?? board.default_status;
 }
 
-export function priorityFor(mapping: Mapping, board: BoardSettings, jiraPriority: string): string | null {
+// A Jira priority the mapping does not name goes to the Backlog priority of its name, else, given Jira's priorities in
+// their order, to the one at its rank, as a draft proposes (both lists run from the highest, the Backlog's lowest past
+// its last), so a connection with no priorities part never drops what a draft would have carried.
+export function priorityFor(mapping: Mapping, board: BoardSettings, jiraPriority: string, jiraPriorities: string[] = []): string | null {
   const named = lookup(mapping.priorities, jiraPriority);
   if (named) return named;
   if (mapping.priorities !== undefined) return null;
-  return board.priorities.find((priority) => same(priority, jiraPriority)) ?? null;
+  const byName = board.priorities.find((priority) => same(priority, jiraPriority));
+  if (byName) return byName;
+  const rank = jiraPriorities.findIndex((priority) => same(priority, jiraPriority));
+  if (rank < 0 || board.priorities.length === 0) return null;
+  return board.priorities[Math.min(rank, board.priorities.length - 1)] ?? null;
+}
+
+// Which side owns a field pair (Jira Sync REQ2): `pull` for one Jira owns, `push` for one the root owns, `both` else.
+export function syncOf(pair: Pair): 'both' | 'pull' | 'push' {
+  if (pair.owner === 'jira') return 'pull';
+  if (pair.owner === 'eidos') return 'push';
+  return 'both';
 }
 
 export function linkTypeFor(mapping: Mapping, board: BoardSettings, jiraLink: string): string | null {
@@ -247,7 +261,7 @@ export function checkMapping(connection: Connection, board: BoardSettings, descr
 // ---- the draft --------------------------------------------------------------------
 
 export interface DraftEntry {
-  part: keyof Omit<Mapping, 'parent'>;
+  part: MappingPart;
   jira: string;
   eidos: string;
   why: string;
@@ -379,7 +393,7 @@ export function editorModel(connection: Connection, board: BoardSettings, descri
   for (const entry of drafted) suggested[entry.part] = [...(suggested[entry.part] ?? []), { jira: entry.jira, eidos: entry.eidos }];
   const held = connection.mapping;
   // a value the held part leaves out is not carried, but a status, which a pull files by its category all the same
-  const start = (part: Exclude<keyof Mapping, 'parent' | 'fields'>, names: string[], leftOutSuggested: boolean): Record<string, string> => {
+  const start = (part: Exclude<MappingPart, 'fields'>, names: string[], leftOutSuggested: boolean): Record<string, string> => {
     const out: Record<string, string> = {};
     for (const jira of names) {
       const own = lookup(held[part], jira);

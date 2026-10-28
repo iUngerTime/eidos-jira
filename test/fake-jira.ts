@@ -23,6 +23,42 @@ export interface FakeUser {
 export const ADA: FakeUser = { accountId: '557058:ada', displayName: 'Ada Example', emailAddress: 'ada@example.com' };
 export const GRACE: FakeUser = { accountId: '557058:grace', displayName: 'Grace Example' };
 export const LIN: FakeUser = { accountId: '557058:lin', displayName: 'Lin Example' };
+export const TESTER: FakeUser = { accountId: '557058:tester', displayName: 'Tester', emailAddress: 'tester@example.com' };
+const PEOPLE = [ADA, GRACE, LIN, TESTER];
+const PRIORITIES = [
+  { id: '1', name: 'Highest' },
+  { id: '2', name: 'High' },
+  { id: '3', name: 'Medium' },
+  { id: '4', name: 'Low' },
+];
+const RESOLUTION = {
+  resolution: {
+    required: true,
+    name: 'Resolution',
+    schema: { type: 'resolution', system: 'resolution' },
+    allowedValues: [
+      { id: '1', name: 'Done' },
+      { id: '2', name: "Won't Do" },
+    ],
+  },
+};
+// the workflow, shaped as CTV's: Done is reached through a screen that asks for a resolution, and leaves only to To Do
+const WORKFLOW: Record<string, Array<{ id: string; name: string; to: keyof typeof STATUSES; screen?: boolean }>> = {
+  '1': [
+    { id: '11', name: 'Start', to: 'progress' },
+    { id: '41', name: 'Done', to: 'done', screen: true },
+  ],
+  '3': [
+    { id: '21', name: 'Send to Code Review', to: 'review' },
+    { id: '12', name: 'Back to To Do', to: 'todo' },
+    { id: '41', name: 'Done', to: 'done', screen: true },
+  ],
+  '4': [
+    { id: '31', name: 'Back to work', to: 'progress' },
+    { id: '41', name: 'Done', to: 'done', screen: true },
+  ],
+  '5': [{ id: '12', name: 'Reopen', to: 'todo' }],
+};
 
 const STATUSES = {
   todo: { id: '1', name: 'To Do', statusCategory: { key: 'new' } },
@@ -54,6 +90,12 @@ export interface FakeIssue {
 
 export interface FakeState {
   issues: FakeIssue[];
+  // the issue properties a create sets, by issue id
+  properties: Map<string, Record<string, unknown>>;
+  // the edits, transitions, and comments the plugin sent, in order
+  writes: Array<{ method: string; path: string; body: Record<string, unknown> }>;
+  // make the next create answer 500 after it made the issue, as a create cut short by a lost connection
+  failCreateAfterWrite: boolean;
   // ids filtered out of the scope (moved, deleted, or no longer matching)
   hidden: Set<string>;
   requests: string[];
@@ -69,6 +111,9 @@ export function seed(): FakeState {
   return {
     hidden: new Set(),
     requests: [],
+    properties: new Map(),
+    writes: [],
+    failCreateAfterWrite: false,
     limitNext: false,
     issues: [
       issue('10100', 'ACME-1', { summary: 'Sign-in epic', issuetype: TYPES.epic, status: STATUSES.progress, priority: { name: 'Medium' }, assignee: null, reporter: ADA, labels: [] }),
@@ -139,12 +184,44 @@ const FIELDS = (type: { id: string }): unknown[] => [
   { fieldId: 'customfield_10016', name: 'Story point estimate', required: false, schema: { type: 'number', custom: 'com.atlassian.jira.plugin.system.customfieldtypes:float' } },
 ];
 
+// an edit's time: now, or a second after the issue's last change when that is later, as Jira's `updated` only moves on
+const later = (updated: string): string => {
+  const next = Math.max(Date.now(), Date.parse(updated.replace('+0000', 'Z')) + 1000);
+  return new Date(next).toISOString().replace('Z', '+0000');
+};
+
+const priorityOf = (value: unknown): { id: string; name: string } => {
+  const asked = value as { id?: string; name?: string };
+  return PRIORITIES.find((priority) => priority.id === asked.id || priority.name === asked.name) ?? { id: '0', name: asked.name ?? '?' };
+};
+
+function transitionsOf(held: FakeIssue): unknown[] {
+  return (WORKFLOW[(held.fields['status'] as { id: string }).id] ?? []).map((transition) => ({
+    id: transition.id,
+    name: transition.name,
+    to: STATUSES[transition.to],
+    hasScreen: transition.screen === true,
+    fields: transition.screen ? RESOLUTION : {},
+  }));
+}
+
+// The edit screen: the create screen's fields, the priority's values with their ids.
+function editmetaOf(type: { id: string }): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of FIELDS(type) as Array<{ fieldId: string; allowedValues?: unknown[] }>) {
+    if (field.fieldId === 'parent') continue;
+    out[field.fieldId] = field.fieldId === 'priority' ? { ...field, allowedValues: PRIORITIES } : field;
+  }
+  return out;
+}
+
 // What one issue looks like in a search: the fields asked for, its comments as the `comment` field.
 function shown(held: FakeIssue, fields: string[]): unknown {
   if (fields.length === 1 && fields[0] === 'id') return { id: held.id, key: held.key };
   const out: Record<string, unknown> = {};
   for (const field of fields) {
     if (field === 'comment') out['comment'] = { comments: held.fields.comments, total: held.fields.comments.length, maxResults: 5000 };
+    else if (field === 'priority' && held.fields['priority']) out['priority'] = priorityOf(held.fields['priority']);
     else if (field in held.fields) out[field] = held.fields[field];
   }
   return { id: held.id, key: held.key, fields: out };
@@ -228,9 +305,110 @@ export async function startFakeJira(state: FakeState = seed()): Promise<{ url: s
       const next = start + max < found.length ? String(start + max) : undefined;
       return send(200, { issues: page.map((held) => shown(held, fields)), ...(next ? { nextPageToken: next } : { isLast: true }) });
     }
+    if (path === '/rest/api/3/user/assignable/search') {
+      const query = (url.searchParams.get('query') ?? '').toLowerCase();
+      return send(200, PEOPLE.filter((person) => person.displayName.toLowerCase().includes(query) || (person.emailAddress ?? '').toLowerCase().includes(query)));
+    }
+    if (path === '/rest/api/3/issue' && request.method === 'POST') {
+      const asked = await body(request);
+      state.writes.push({ method: 'POST', path, body: asked });
+      const given = (asked['fields'] ?? {}) as Record<string, unknown>;
+      const type = Object.values(TYPES).find((held) => held.id === (given['issuetype'] as { id?: string })?.id);
+      if (!type) return send(400, { errors: { issuetype: 'Specify a valid issue type' } });
+      if (!given['summary']) return send(400, { errors: { summary: 'You must specify a summary of the issue.' } });
+      if (type.subtask && !given['parent']) return send(400, { errors: { parent: 'Sub-task requires a parent.' } });
+      const number = Math.max(...state.issues.map((held) => Number(held.key.split('-')[1]))) + 1;
+      const id = String(10100 + number * 7);
+      const now = new Date().toISOString().replace('Z', '+0000');
+      const parentId = (given['parent'] as { id?: string } | undefined)?.id;
+      const parent = parentId ? state.issues.find((held) => held.id === parentId) : undefined;
+      const made = issue(id, `ACME-${number}`, {
+        ...given,
+        issuetype: type,
+        status: STATUSES.todo,
+        reporter: TESTER,
+        priority: given['priority'] ? priorityOf(given['priority']) : { name: 'Medium' },
+        assignee: given['assignee'] ? (PEOPLE.find((person) => person.accountId === (given['assignee'] as { accountId?: string }).accountId) ?? null) : null,
+        parent: parent ? { id: parent.id, key: parent.key } : undefined,
+        labels: given['labels'] ?? [],
+        created: now,
+        updated: now,
+      });
+      state.issues.push(made);
+      for (const property of (asked['properties'] ?? []) as Array<{ key: string; value: unknown }>) state.properties.set(`${id}/${property.key}`, property.value as Record<string, unknown>);
+      if (state.failCreateAfterWrite) {
+        state.failCreateAfterWrite = false;
+        return send(500, { errorMessages: ['The connection was lost'] });
+      }
+      return send(201, { id, key: made.key, self: `${url.origin}/rest/api/3/issue/${id}` });
+    }
+    const property = /^\/rest\/api\/3\/issue\/(\d+)\/properties\/([\w.-]+)$/.exec(path);
+    if (property) {
+      const value = state.properties.get(`${property[1]}/${property[2]}`);
+      return value ? send(200, { key: property[2], value }) : send(404, { errorMessages: ['The property does not exist.'] });
+    }
+    const transitions = /^\/rest\/api\/3\/issue\/(\d+)\/transitions$/.exec(path);
+    if (transitions) {
+      const held = state.issues.find((candidate) => candidate.id === transitions[1]);
+      if (!held) return send(404, { errorMessages: ['Issue does not exist'] });
+      if (request.method === 'POST') {
+        const asked = await body(request);
+        state.writes.push({ method: 'POST', path, body: asked });
+        const id = (asked['transition'] as { id?: string })?.id;
+        const hop = (WORKFLOW[(held.fields['status'] as { id: string }).id] ?? []).find((transition) => transition.id === id);
+        if (!hop) return send(400, { errorMessages: [`Transition id '${id}' is not valid for this issue.`] });
+        const fields = (asked['fields'] ?? {}) as Record<string, unknown>;
+        if (hop.screen && !fields['resolution']) return send(400, { errors: { resolution: 'Resolution is required.' } });
+        held.fields['status'] = STATUSES[hop.to];
+        if (fields['resolution']) held.fields['resolution'] = fields['resolution'];
+        held.fields.updated = later(held.fields.updated);
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      return send(200, { transitions: transitionsOf(held) });
+    }
+    const one = /^\/rest\/api\/3\/issue\/(\d+)$/.exec(path);
+    if (one) {
+      const held = state.issues.find((candidate) => candidate.id === one[1]);
+      if (!held) return send(404, { errorMessages: ['Issue does not exist or you do not have permission to see it.'] });
+      if (request.method === 'PUT') {
+        const asked = await body(request);
+        state.writes.push({ method: 'PUT', path, body: asked });
+        const given = (asked['fields'] ?? {}) as Record<string, unknown>;
+        for (const [field, value] of Object.entries(given)) {
+          if (field === 'priority') held.fields['priority'] = priorityOf(value);
+          else if (field === 'assignee') held.fields['assignee'] = value ? (PEOPLE.find((person) => person.accountId === (value as { accountId?: string }).accountId) ?? null) : null;
+          else held.fields[field] = value;
+        }
+        held.fields.updated = later(held.fields.updated);
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      const fields = (url.searchParams.get('fields') ?? '').split(',').filter(Boolean);
+      const out = shown(held, fields.length > 0 ? fields : Object.keys(held.fields)) as { id: string; key: string; fields: Record<string, unknown> };
+      if (out.fields['priority']) out.fields['priority'] = priorityOf(out.fields['priority']);
+      const expand = url.searchParams.get('expand') ?? '';
+      const type = held.fields['issuetype'] as { id: string };
+      return send(200, {
+        ...out,
+        ...(expand.includes('editmeta') ? { editmeta: { fields: editmetaOf(type) } } : {}),
+        ...(expand.includes('transitions') ? { transitions: transitionsOf(held) } : {}),
+      });
+    }
     const comments = /^\/rest\/api\/3\/issue\/(\d+)\/comment$/.exec(path);
     if (comments) {
       const held = state.issues.find((candidate) => candidate.id === comments[1]);
+      if (held && request.method === 'POST') {
+        const asked = await body(request);
+        state.writes.push({ method: 'POST', path, body: asked });
+        const now = later(held.fields.updated);
+        const comment: FakeComment = { id: String(30100 + state.writes.length), author: TESTER, body: asked['body'] as Doc, created: now, updated: now };
+        held.fields.comments.push(comment);
+        held.fields.updated = now;
+        return send(201, comment);
+      }
       return held ? send(200, { comments: held.fields.comments, total: held.fields.comments.length, startAt: 0, maxResults: 100 }) : send(404, { errorMessages: ['Issue does not exist'] });
     }
     if (/^\/secure\/attachment\/\d+\//.test(path)) {

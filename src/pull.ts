@@ -12,13 +12,13 @@ import type { Host } from 'eidosmd/plugin';
 import { adfToMarkdown, type AdfContext } from './adf.ts';
 import { siteBase, type Requester } from './client.ts';
 import { siteKey, type Connection, type Pair } from './connections.ts';
-import { categoryOf } from './describe.ts';
+import { cachedDescription, categoryOf } from './describe.ts';
 import { DEFAULT_TYPE, fieldsFor, fieldsOf, linkTypeFor, priorityFor, statusFor, typeFor } from './mapping.ts';
 import type { AssetsApi, BacklogApi, BoardSettings, CommentsApi, TaskFields, TaskView, ThreadView } from './types.ts';
 
 // ---- what Jira gives -----------------------------------------------------------------
 
-interface JiraUser {
+export interface JiraUser {
   accountId: string;
   displayName?: string;
   emailAddress?: string;
@@ -73,7 +73,14 @@ export interface Held {
   comments?: string;
   parent?: string;
   digest?: Record<string, string>;
+  // what Jira itself held for each mapped field at the last pull or sync, hashed before the mapping reads it (a status's id,
+  // an option's id, a document with its local ids taken out), so a change in Jira that the mapping folds away is still seen
+  remote?: Record<string, string>;
   gone?: string;
+  // the connection that created the issue from this task, and the mark a create leaves before Jira answers (Jira Push)
+  connection?: string;
+  pending?: string;
+  since?: string;
 }
 
 // ---- the plan ---------------------------------------------------------------------
@@ -85,6 +92,10 @@ export interface Plan {
   change: Array<{ key: string; task: string; fields: string[] }>;
   // tasks whose mapped fields were edited in the root since their last pull, and those fields (REQ5)
   local: Array<{ key: string; task: string; fields: string[] }>;
+  // tasks whose fields the root owns that Jira changed, left as the root has them for a sync to settle
+  owned: Array<{ key: string; task: string; fields: string[] }>;
+  // issues a cut-short create made, left for that task's next create to link
+  waiting: Array<{ key: string; task: string }>;
   comments: { add: number; change: number; remove: number };
   // the people a pull adds to the root's users, with `add_people` on
   people: string[];
@@ -211,7 +222,7 @@ export function moment(value: unknown): string | undefined {
   return `${match[1]}${zone}`;
 }
 
-const short = (value: unknown): string =>
+export const short = (value: unknown): string =>
   createHash('sha256')
     .update(JSON.stringify(value ?? null))
     .digest('hex')
@@ -227,6 +238,35 @@ const named = (value: unknown): string | null => {
   return null;
 };
 
+// Jira's own value for one field, as the remote base hashes it: an object by its id (a status, a priority, an option, a
+// person by their account), a list in Jira's order, and a document without the local ids an editor stamps on its nodes.
+export function rawOf(value: unknown): unknown {
+  if (value === null || value === undefined || value === '') return null;
+  if (Array.isArray(value)) return value.length === 0 ? null : value.map(rawOf);
+  if (typeof value !== 'object') return value;
+  const held = value as Record<string, unknown>;
+  if (held['type'] === 'doc' || Array.isArray(held['content'])) return stripLocal(held);
+  for (const key of ['accountId', 'id', 'value', 'name', 'key']) if (typeof held[key] === 'string' || typeof held[key] === 'number') return { [key]: held[key] };
+  return value;
+}
+
+function stripLocal(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(stripLocal);
+  if (typeof node !== 'object' || node === null) return node;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    if (key === 'localId') continue;
+    out[key] = stripLocal(value);
+  }
+  return out;
+}
+
+// The remote base of one pair: Jira's own value of its field (the parent by its issue id).
+export function remoteOf(issue: Issue, pair: Pair): string {
+  if (pair.eidos === 'parent') return short(issue.fields.parent?.id ?? null);
+  return short(rawOf(issue.fields[pair.jira]));
+}
+
 // The latest of an issue's sprints: the active one, else the last listed.
 function latestSprint(value: unknown): { name: string; end: string | null } | null {
   if (!Array.isArray(value) || value.length === 0) return null;
@@ -238,7 +278,7 @@ function latestSprint(value: unknown): { name: string; end: string | null } | nu
 }
 
 // What a task holds now for one Eidos side of a pair, as the digest reads it.
-function heldValue(task: TaskView, eidos: string): unknown {
+export function heldValue(task: TaskView, eidos: string): unknown {
   const [head, name = ''] = eidos.split(/:(.*)/s);
   switch (head) {
     case 'title':
@@ -264,7 +304,7 @@ function heldValue(task: TaskView, eidos: string): unknown {
   }
 }
 
-const heldOf = (task: TaskView): Held | null => {
+export const heldOf = (task: TaskView): Held | null => {
   const value = task.properties['jira'];
   if (typeof value !== 'object' || value === null) return null;
   const held = value as Record<string, unknown>;
@@ -272,6 +312,15 @@ const heldOf = (task: TaskView): Held | null => {
 };
 
 const projectOf = (key: string): string => key.replace(/-\d+$/, '').toUpperCase();
+
+// Jira's priorities from the highest, for a priority the mapping leaves to its rank: the description's, else read once.
+export async function prioritiesOf(context: Pick<Context, 'host' | 'client' | 'connection'>): Promise<string[]> {
+  if (context.connection.mapping.priorities !== undefined) return [];
+  const held = cachedDescription(context.host.workspace, context.connection.name);
+  if (held) return held.priorities;
+  const page = await context.client.get<{ values?: Array<{ name: string }> }>('/rest/api/3/priority/search', { maxResults: 100 }).catch(() => null);
+  return (page?.values ?? []).map((priority) => priority.name);
+}
 
 // ---- the run -----------------------------------------------------------------------
 
@@ -286,6 +335,8 @@ export interface Context {
   pullAttachments: boolean;
   // `add_people`: a person the root does not have is added to its users
   addPeople: boolean;
+  // the Jira account the token signs in as, whose root user's messages a sync may send
+  me?: JiraUser;
 }
 
 // One issue as the pull would write it.
@@ -296,10 +347,14 @@ interface Intent {
   fields: TaskFields;
   // the digest per Eidos side, of the values the fields set
   digest: Record<string, string>;
+  // Jira's own value per Eidos side
+  remote: Record<string, string>;
   // the Eidos sides whose value changes
   changes: string[];
   // the Eidos sides edited in the root since the last pull
   local: string[];
+  // the sides the root owns (a pair's `owner: eidos`) that Jira holds otherwise; a pull leaves them, a sync settles them
+  owned: string[];
   parentIssue: string | null;
   parentKey: string | null;
   comments: JiraComment[] | null;
@@ -314,18 +369,22 @@ interface Person {
   user: string | null;
 }
 
-interface People {
+export interface People {
   of(user: { displayName?: string; accountId?: string; emailAddress?: string | null } | null | undefined): Person | null;
   // the people a pull added, or a fetch would add, by name
   added: Set<string>;
 }
 
-function peopleFor(context: Context, write: boolean): People {
+export function peopleFor(context: Context, write: boolean): People {
   const added = new Set<string>();
   const of: People['of'] = (user) => {
     if (!user?.accountId && !user?.displayName) return null;
     const name = user.displayName?.trim() || 'Jira';
-    const found = context.comments?.authorAs(name) ?? null;
+    // the mapping's users first: a Jira person named by their account, email, or name, as the root user they are
+    const listed = context.connection.mapping.users?.find((pair) =>
+      [user.accountId, user.emailAddress ?? undefined, user.displayName].some((held) => held !== undefined && held.trim().toLowerCase() === pair.jira.trim().toLowerCase()),
+    );
+    const found = (listed ? context.comments?.authorAs(listed.eidos) : null) ?? context.comments?.authorAs(name) ?? null;
     if (found?.user) return { name, user: found.user };
     if (!context.addPeople || !user.accountId) return { name, user: null };
     added.add(name);
@@ -352,6 +411,7 @@ export async function run(context: Context, write: boolean, options: PullOptions
   const inScope = new Set((await search(client, scope, ['id'], 5000)).map((issue) => issue.id));
   const site = siteKey(connection.site);
   const base = siteBase(connection.site);
+  const jiraPriorities = await prioritiesOf(context);
 
   const tasks = (): TaskView[] => backlog.tasks();
   const byIssue = (): Map<string, TaskView> => {
@@ -363,6 +423,12 @@ export async function run(context: Context, write: boolean, options: PullOptions
     return out;
   };
   const held = byIssue();
+  // tasks whose create was cut short: an issue carrying one's mark is that task's, never a second task (Jira Push REQ9)
+  const pendingMarks = new Map<string, string>();
+  for (const task of tasks()) {
+    const mark = task.properties['jira'] as { site?: unknown; pending?: unknown } | null | undefined;
+    if (typeof mark?.pending === 'string' && typeof mark.site === 'string' && siteKey(mark.site) === site) pendingMarks.set(mark.pending, task.id ?? task.name);
+  }
   // REQ11: a task marked gone whose issue is in the scope again is read with what changed, though Jira may not have
   // changed it, so it comes back; read by id, a hundred at a time
   const pulledIds = new Set(issues.map((issue) => issue.id));
@@ -375,6 +441,8 @@ export async function run(context: Context, write: boolean, options: PullOptions
     add: [],
     change: [],
     local: [],
+    owned: [],
+    waiting: [],
     comments: { add: 0, change: 0, remove: 0 },
     people: [],
     gone: [],
@@ -415,61 +483,23 @@ export async function run(context: Context, write: boolean, options: PullOptions
       plan.unchanged += 1;
       continue;
     }
-    const media = attachmentsFor(context, issue, task);
-    const adf: AdfContext = { mention, media: media.link };
-    const fields: TaskFields = { type };
-    const digest: Record<string, string> = { type: short(type) };
-    let parentIssue: string | null = null;
-    let parentKey: string | null = null;
-    const issuePairs = fieldsFor(pairs, issue.fields.issuetype?.name ?? '');
-    for (const pair of issuePairs) {
-      const value = issue.fields[pair.jira];
-      const [head, name = ''] = pair.eidos.split(/:(.*)/s);
-      switch (head) {
-        case 'title':
-          fields.title = named(value)?.trim() || issue.key;
-          break;
-        case 'status': {
-          const status = issue.fields.status;
-          fields.status = status ? statusFor(connection.mapping, board, status.name, categoryOf(status.statusCategory?.key)) : board.default_status;
-          break;
-        }
-        case 'priority':
-          fields.priority = named(value) ? priorityFor(connection.mapping, board, named(value)!) : null;
-          break;
-        case 'assignee': {
-          const users = (Array.isArray(value) ? value : value ? [value] : []) as JiraUser[];
-          fields.assignee = users.map((user) => people.of(user)).flatMap((person) => (person ? [person.user ?? person.name] : []));
-          break;
-        }
-        case 'milestone': {
-          const sprint = latestSprint(value);
-          if (sprint) sprints.set(sprint.name, sprint.end);
-          fields.milestone = sprint ? sprint.name : named(value);
-          break;
-        }
-        case 'parent': {
-          const parent = issue.fields.parent;
-          if (!parent) break;
-          parentKey = parent.key;
-          const rule = connection.mapping.parent ?? 'subtasks';
-          const asParent = rule === 'all' || (rule === 'subtasks' && issue.fields.issuetype?.subtask === true);
-          if (!asParent) break;
-          if (carried.has(parent.id)) parentIssue = parent.id;
-          else plan.left_out.parents += 1;
-          break;
-        }
-        case 'section':
-          fields.sections = { ...(fields.sections ?? {}), [name]: asText(value, adf) };
-          break;
-        case 'property':
-          fields.properties = { ...(fields.properties ?? {}), [name]: asProperty(value, board, name, adf) };
-          break;
-        default:
-          break;
+    if (!task && pendingMarks.size > 0) {
+      const property = await client.get<{ value?: { pending?: string } }>(`/rest/api/3/issue/${issue.id}/properties/eidos`).catch(() => null);
+      const waiting = property?.value?.pending ? pendingMarks.get(property.value.pending) : undefined;
+      if (waiting) {
+        plan.waiting.push({ key: issue.key, task: waiting });
+        continue;
       }
     }
-    if (fields.title === undefined) fields.title = named(issue.fields.summary) ?? issue.key;
+    const media = attachmentsFor(context, issue, task);
+    const adf: AdfContext = { mention, media: media.link };
+    const digest: Record<string, string> = { type: short(type) };
+    const issuePairs = fieldsFor(pairs, issue.fields.issuetype?.name ?? '');
+    const intended = intendFields(connection, board, issue, type, issuePairs, people, adf, carried, jiraPriorities);
+    const { fields, parentIssue, parentKey } = intended;
+    if (intended.sprint) sprints.set(intended.sprint.name, intended.sprint.end);
+    if (intended.parentLeftOut) plan.left_out.parents += 1;
+    const remote: Record<string, string> = Object.fromEntries(issuePairs.map((pair) => [pair.eidos, remoteOf(issue, pair)]));
     for (const pair of issuePairs) if (pair.eidos !== 'parent') digest[pair.eidos] = short(normalise(intendedValue(fields, pair.eidos)));
     if (issuePairs.some((pair) => pair.eidos === 'parent')) digest['parent'] = short(parentIssue);
     const changes: string[] = [];
@@ -489,7 +519,9 @@ export async function run(context: Context, write: boolean, options: PullOptions
     }
     const comments = context.comments ? await commentsToPull(context, issue, task, was, options) : null;
     plan.attachments += media.downloads.length;
-    intents.push({ issue, task, type, fields, digest, changes, local: local.filter((eidos) => changes.includes(eidos)), parentIssue, parentKey, comments });
+    const owned = task ? issuePairs.filter((pair) => pair.owner === 'eidos' && changes.includes(pair.eidos)).map((pair) => pair.eidos) : [];
+    intents.push({ issue, task, type, fields, digest, remote, changes, local: local.filter((eidos) => changes.includes(eidos)), owned, parentIssue, parentKey, comments });
+    if (owned.length > 0) plan.owned.push({ key: issue.key, task: task!.id ?? task!.name, fields: owned });
     if (!task) plan.add.push({ key: issue.key, title: fields.title ?? issue.key, type });
     else if (changes.length > 0 || was?.key !== issue.key || was?.gone !== undefined) plan.change.push({ key: issue.key, task: task.id ?? task.name, fields: changes });
     else plan.unchanged += 1;
@@ -548,17 +580,22 @@ export async function run(context: Context, write: boolean, options: PullOptions
     const was = task ? heldOf(task) : null;
     const fields: TaskFields = { ...intent.fields };
     const digest = { ...intent.digest };
-    // --keep-local: a field edited in the root keeps the root's value, and its digest as it was, so it still reads as edited
-    if (task && options.keepLocal) {
-      for (const eidos of intent.local) {
+    const remote = { ...intent.remote };
+    // --keep-local, and a field the root owns: the root's value is kept, and its digest as it was, so it still reads as edited
+    const kept = task ? [...new Set([...(options.keepLocal ? intent.local : []), ...intent.owned])] : [];
+    if (task && kept.length > 0) {
+      for (const eidos of kept) {
         dropField(fields, eidos);
         if (was?.digest?.[eidos] !== undefined) digest[eidos] = was.digest[eidos];
+        // and Jira's value as it was, so a sync still sees that Jira changed it
+        if (was?.remote?.[eidos] !== undefined) remote[eidos] = was.remote[eidos];
+        else delete remote[eidos];
       }
-      if (intent.local.length > 0) done.kept_local += 1;
+      if (options.keepLocal && intent.local.length > 0) done.kept_local += 1;
     }
     const parentTask = intent.parentIssue ? index.get(intent.parentIssue) : undefined;
     const issuePairs = fieldsFor(pairs, issue.fields.issuetype?.name ?? '');
-    if (issuePairs.some((pair) => pair.eidos === 'parent') && !(options.keepLocal && intent.local.includes('parent'))) fields.parent = parentTask ? (parentTask.id ?? parentTask.name) : null;
+    if (issuePairs.some((pair) => pair.eidos === 'parent') && !kept.includes('parent')) fields.parent = parentTask ? (parentTask.id ?? parentTask.name) : null;
     const downloads = await downloadAttachments(context, issue, task);
     done.attachments += downloads;
     const adfAgain: AdfContext = { mention, media: attachmentsFor(context, issue, task).link };
@@ -572,6 +609,8 @@ export async function run(context: Context, write: boolean, options: PullOptions
       ...(intent.comments ? { comments: commentMark(intent.comments) } : was?.comments ? { comments: was.comments } : {}),
       ...(intent.parentKey && !parentTask ? { parent: intent.parentKey } : {}),
       digest: Object.fromEntries(Object.entries(digest).sort(([a], [b]) => a.localeCompare(b))),
+      remote: Object.fromEntries(Object.entries(remote).sort(([a], [b]) => a.localeCompare(b))),
+      ...(was?.connection ? { connection: was.connection } : {}),
     };
     const dates = { ...(moment(issue.fields.updated) ? { updated: moment(issue.fields.updated)! } : {}) };
     let written: TaskView;
@@ -605,7 +644,7 @@ export async function run(context: Context, write: boolean, options: PullOptions
     const settled = Object.fromEntries(
       Object.keys(jira.digest!).map((eidos) => [
         eidos,
-        eidos === 'parent' ? jira.digest![eidos]! : options.keepLocal && intent.local.includes(eidos) ? jira.digest![eidos]! : short(normalise(heldValue(written, eidos))),
+        eidos === 'parent' ? jira.digest![eidos]! : kept.includes(eidos) ? jira.digest![eidos]! : short(normalise(heldValue(written, eidos))),
       ]),
     );
     if (JSON.stringify(settled) !== JSON.stringify(jira.digest)) written = backlog.set(written.id ?? written.name, { ...dates, tool: { jira: { ...jira, digest: settled } } });
@@ -671,6 +710,79 @@ export async function run(context: Context, write: boolean, options: PullOptions
   return { plan, done };
 }
 
+// The task fields one issue's mapped pairs give, as a pull writes them and a sync compares them.
+export interface Intended {
+  fields: TaskFields;
+  parentIssue: string | null;
+  parentKey: string | null;
+  parentLeftOut: boolean;
+  sprint: { name: string; end: string | null } | null;
+}
+
+export function intendFields(
+  connection: Connection,
+  board: BoardSettings,
+  issue: Issue,
+  type: string,
+  issuePairs: Pair[],
+  people: People,
+  adf: AdfContext,
+  carried: Set<string>,
+  jiraPriorities: string[] = [],
+): Intended {
+  const fields: TaskFields = { type };
+  const out: Intended = { fields, parentIssue: null, parentKey: null, parentLeftOut: false, sprint: null };
+  for (const pair of issuePairs) {
+    const value = issue.fields[pair.jira];
+    const [head, name = ''] = pair.eidos.split(/:(.*)/s);
+    switch (head) {
+      case 'title':
+        fields.title = named(value)?.trim() || issue.key;
+        break;
+      case 'status': {
+        const status = issue.fields.status;
+        fields.status = status ? statusFor(connection.mapping, board, status.name, categoryOf(status.statusCategory?.key)) : board.default_status;
+        break;
+      }
+      case 'priority':
+        fields.priority = named(value) ? priorityFor(connection.mapping, board, named(value)!, jiraPriorities) : null;
+        break;
+      case 'assignee': {
+        const users = (Array.isArray(value) ? value : value ? [value] : []) as JiraUser[];
+        fields.assignee = users.map((user) => people.of(user)).flatMap((person) => (person ? [person.user ?? person.name] : []));
+        break;
+      }
+      case 'milestone': {
+        const sprint = latestSprint(value);
+        if (sprint) out.sprint = sprint;
+        fields.milestone = sprint ? sprint.name : named(value);
+        break;
+      }
+      case 'parent': {
+        const parent = issue.fields.parent;
+        if (!parent) break;
+        out.parentKey = parent.key;
+        const rule = connection.mapping.parent ?? 'subtasks';
+        const asParent = rule === 'all' || (rule === 'subtasks' && issue.fields.issuetype?.subtask === true);
+        if (!asParent) break;
+        if (carried.has(parent.id)) out.parentIssue = parent.id;
+        else out.parentLeftOut = true;
+        break;
+      }
+      case 'section':
+        fields.sections = { ...(fields.sections ?? {}), [name]: asText(value, adf) };
+        break;
+      case 'property':
+        fields.properties = { ...(fields.properties ?? {}), [name]: asProperty(value, board, name, adf) };
+        break;
+      default:
+        break;
+    }
+  }
+  if (fields.title === undefined) fields.title = named(issue.fields.summary) ?? issue.key;
+  return out;
+}
+
 // ---- fields -----------------------------------------------------------------------
 
 function asText(value: unknown, adf: AdfContext): string {
@@ -693,7 +805,7 @@ function asProperty(value: unknown, board: BoardSettings, name: string, adf: Adf
   return asText(value, adf) || null;
 }
 
-function intendedValue(fields: TaskFields, eidos: string): unknown {
+export function intendedValue(fields: TaskFields, eidos: string): unknown {
   const [head, name = ''] = eidos.split(/:(.*)/s);
   switch (head) {
     case 'title':
@@ -718,7 +830,7 @@ function intendedValue(fields: TaskFields, eidos: string): unknown {
 }
 
 // One value as the digest compares it: an empty list, an empty text, and nothing read alike.
-function normalise(value: unknown): unknown {
+export function normalise(value: unknown): unknown {
   if (value === undefined || value === '' || (Array.isArray(value) && value.length === 0)) return null;
   if (typeof value === 'string') return value.trim();
   return value;
@@ -811,6 +923,17 @@ function applyComments(
     const as = (person.user ? comments.authorAs(person.user) : null) ?? { name: person.name, role: null, user: null };
     const origin = { written: comment.created, external: externalOf(comment) };
     const at = thread?.messages.findIndex((message) => message.external === externalOf(comment)) ?? -1;
+    // a message a sync sent whose answer was lost before it was taken in: the same text, unsent as far as the thread
+    // knows, signed by the root user the comment's author is; it becomes the comment, not a second copy of it
+    const sentHere = thread && at < 0 && person.user ? thread.messages.findIndex((message) => !message.external && message.user === person.user && message.text.trim() === text.trim()) : -1;
+    if (thread && sentHere >= 0) {
+      const held = thread.messages[sentHere]!;
+      comments.removeMessage(thread.id, sentHere);
+      const still = comments.threads({ host: 'backlog', id: task.id! }).find((candidate) => candidate.id === threadIdOf(issue));
+      const signer = { name: held.author, role: null, user: held.user ?? null };
+      thread = still ? comments.reply(still.id, text, signer, origin) : comments.start({ host: 'backlog', id: task.id! }, null, text, signer, { ...origin, thread: threadIdOf(issue) });
+      continue;
+    }
     if (thread && at >= 0) {
       if (thread.messages[at]!.text.trim() !== text.trim()) {
         thread = comments.editMessage(thread.id, at, text);
@@ -836,7 +959,7 @@ function assetFolder(context: Context): string | null {
 // its file in the root once a pull with pull_attachments downloaded it.
 const IMAGE = /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i;
 
-function attachmentsFor(context: Context, issue: Issue, task: TaskView | null): { link: AdfContext['media']; downloads: JiraAttachment[] } {
+export function attachmentsFor(context: Context, issue: Issue, task: TaskView | null): { link: AdfContext['media']; downloads: JiraAttachment[] } {
   const attachments = issue.fields.attachment ?? [];
   const base = siteBase(context.connection.site);
   const files = context.pullAttachments && context.assets ? context.assets.files() : [];
@@ -844,9 +967,11 @@ function attachmentsFor(context: Context, issue: Issue, task: TaskView | null): 
   const folder = context.backlog.folder();
   return {
     downloads,
-    link: (_id, alt) => {
+    link: (id, alt) => {
       const attachment = attachments.find((held) => alt !== null && held.filename === alt) ?? (attachments.length === 1 ? attachments[0] : undefined);
-      if (!attachment) return null;
+      // a file pasted into the text carries no name to know its attachment by; it is a link to the issue, one per file,
+      // so it is not lost from the text and a sync sends it back as Jira's own
+      if (!attachment) return { label: 'file in Jira', href: `${base}/browse/${issue.key}?media=${encodeURIComponent(id)}` };
       const file = files.find((held) => held.name === assetName(attachment));
       // one in the root is drawn as an image where it is one; one in Jira stays a link, since the page cannot read it without the person's Jira sign-in
       if (file && task)

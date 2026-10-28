@@ -14,6 +14,12 @@ export interface Pair {
   eidos: string;
   // a field pair's issue types (Jira REQ7), where an epic's field goes somewhere a bug's does not; absent, every type
   types?: string[];
+  // on a status, priority, type, or link type: the Jira value a sync or a create sends for the Backlog value, where
+  // several Jira values read as it (Done, not Canceled)
+  push?: boolean;
+  // on a field: which side owns it. `jira` is never sent; `eidos` is never pulled over, a change in Jira to it a
+  // conflict to settle. Absent, each side may change it and a sync carries the change
+  owner?: 'jira' | 'eidos';
 }
 
 export type ParentRule = 'subtasks' | 'all' | 'none';
@@ -24,10 +30,16 @@ export interface Mapping {
   priorities?: Pair[];
   link_types?: Pair[];
   fields?: Pair[];
+  // a Jira person (their account id, email, or name) to the root user they are, both ways
+  users?: Pair[];
   parent?: ParentRule;
+  // what a transition's screen asks for, by the Jira status it goes to: `{ Canceled: { resolution: "Won't Do" } }`
+  transition_fields?: Record<string, Record<string, string>>;
+  // what a create sends: the Jira issue type for a Backlog type, and a value for a field Jira requires and the task does not hold
+  create?: { types?: Record<string, string>; fields?: Record<string, string> };
 }
 
-export const MAPPING_PARTS = ['types', 'statuses', 'priorities', 'link_types', 'fields'] as const;
+export const MAPPING_PARTS = ['types', 'statuses', 'priorities', 'link_types', 'fields', 'users'] as const;
 export type MappingPart = (typeof MAPPING_PARTS)[number];
 
 export interface Connection {
@@ -53,8 +65,21 @@ function readPairs(value: unknown): Pair[] | undefined {
     const jira = text(entry['jira']);
     const eidos = text(entry['eidos']);
     const types = Array.isArray(entry['types']) ? entry['types'].map(text).filter((type): type is string => Boolean(type)) : [];
-    return jira && eidos ? [{ jira, eidos, ...(types.length > 0 ? { types } : {}) }] : [];
+    const owner = entry['owner'] === 'jira' || entry['owner'] === 'eidos' ? entry['owner'] : undefined;
+    return jira && eidos ? [{ jira, eidos, ...(types.length > 0 ? { types } : {}), ...(entry['push'] === true ? { push: true } : {}), ...(owner ? { owner } : {}) }] : [];
   });
+}
+
+function readFlat(value: unknown): Record<string, string> | undefined {
+  if (!plain(value)) return undefined;
+  const out = Object.fromEntries(Object.entries(value).flatMap(([key, held]) => (text(held) ? [[key, text(held)!]] : [])));
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function readNested(value: unknown): Record<string, Record<string, string>> | undefined {
+  if (!plain(value)) return undefined;
+  const out = Object.fromEntries(Object.entries(value).flatMap(([key, held]) => (readFlat(held) ? [[key, readFlat(held)!]] : [])));
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 // One entry of `connections` read forgivingly: an entry with no name, site, or project is no connection.
@@ -72,6 +97,14 @@ export function readConnection(value: unknown): Connection | null {
   }
   const parent = text(held['parent']);
   if (parent === 'subtasks' || parent === 'all' || parent === 'none') mapping.parent = parent;
+  const transitionFields = readNested(held['transition_fields']);
+  if (transitionFields) mapping.transition_fields = transitionFields;
+  if (plain(held['create'])) {
+    const create = held['create'];
+    const types = readFlat(create['types']);
+    const fields = readFlat(create['fields']);
+    if (types || fields) mapping.create = { ...(types ? { types } : {}), ...(fields ? { fields } : {}) };
+  }
   const board = Number(value['board']);
   const jql = text(value['jql']);
   return {

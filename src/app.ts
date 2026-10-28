@@ -9,6 +9,7 @@ import { fromBoardUrl } from './connections.ts';
 import type { JiraApi } from './index.ts';
 import type { MappingChoice } from './mapping.ts';
 import type { MappingPart } from './connections.ts';
+import type { SyncOptions } from './sync.ts';
 
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
 
@@ -24,14 +25,33 @@ async function answer<T>(work: () => Promise<T> | T): Promise<T> {
 
 const SETTINGS = ['pull_attachments', 'add_people', 'auto_fetch'] as const;
 
+// The options a sync is run with, as the page's review sends them: only what it can choose, each checked here.
+function syncOptions(value: unknown): SyncOptions {
+  const held = typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const strings = (record: unknown): Record<string, string> =>
+    typeof record === 'object' && record !== null && !Array.isArray(record) ? Object.fromEntries(Object.entries(record).flatMap(([key, item]) => (text(item) ? [[key, text(item)]] : []))) : {};
+  const take = Object.fromEntries(Object.entries(strings(held['take'])).filter(([, side]) => side === 'jira' || side === 'eidos')) as Record<string, 'jira' | 'eidos'>;
+  return {
+    take,
+    acceptLoss: Array.isArray(held['accept_loss']) ? held['accept_loss'].map(text).filter(Boolean) : [],
+    ...(text(held['status_to']) ? { statusTo: text(held['status_to']) } : {}),
+    ...(Array.isArray(held['via']) ? { via: held['via'].map(text).filter(Boolean) } : {}),
+    transitionFields: strings(held['fields']),
+    noComments: held['no_comments'] === true,
+    ...(typeof held['expect'] === 'object' && held['expect'] !== null ? { expect: strings(held['expect']) } : {}),
+  };
+}
+
 function state(host: AppHost, api: JiraApi): Record<string, unknown> {
   const status = api.status();
+  const waiting = api.syncStatus();
   return {
     sign_ins: api.signIns(),
     connections: api.connections().map((connection) => ({
       ...connection,
       problems: api.problems(connection.name),
       status: status.find((entry) => entry.connection === connection.name) ?? null,
+      sync: waiting.find((entry) => entry.connection === connection.name) ?? null,
     })),
     settings: Object.fromEntries(SETTINGS.map((name) => [name, host.settings().get(name)])),
   };
@@ -118,6 +138,15 @@ const entry: AppEntry<JiraApi> = {
           await host.settings().set(name, value);
         }
         return { state: state(host, api) };
+      }),
+    );
+
+    // Jira Sync from the page: the plan as the review draws it, then the sync once the person settled what it asked
+    host.route('POST', 'sync-plan', (request) => answer(() => api.syncPlan(text(request.body['task']), syncOptions(request.body['options']))));
+    host.route('POST', 'sync', (request) =>
+      answer(async () => {
+        const done = await api.sync(text(request.body['task']), syncOptions(request.body['options']));
+        return { done, state: state(host, api) };
       }),
     );
 

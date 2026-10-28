@@ -104,6 +104,8 @@ export interface CommentsApi {
   editMessage(thread: string, index: number, text: string): ThreadView;
   removeMessage(thread: string, index: number): ThreadView | null;
   authorAs(key: string): Author | null;
+  // who signs a message written now: the acting user, else the git identity matched to a listed user
+  author(): Author;
 }
 
 export interface AssetsApi {

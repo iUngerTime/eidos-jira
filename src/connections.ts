@@ -147,6 +147,26 @@ const accountsIn = (held: unknown): Record<string, string> =>
 const rootAccounts = (host: Host): Record<string, string> => accountsIn(host.settings().get<unknown>('accounts'));
 const machineAccounts = (): Record<string, string> => accountsIn(tokenStore().accounts());
 
+// Every site a sign-in is kept for here, this root's and this machine's, once each.
+export function signedInSites(host: Host): string[] {
+  return [...new Set([...Object.keys(rootAccounts(host)), ...Object.keys(machineAccounts())])];
+}
+
+// A board's address as Jira shows it (`https://acme.atlassian.net/jira/software/projects/ACME/boards/12`), read
+// into the site, the project's key, and the board; null for anything else.
+export function fromBoardUrl(address: string): { site: string; project: string; board: number | null } | null {
+  let url: URL;
+  try {
+    url = new URL(address.trim());
+  } catch {
+    return null;
+  }
+  const project = /\/projects\/([A-Za-z][A-Za-z0-9_]*)/.exec(url.pathname)?.[1];
+  if (!project) return null;
+  const board = /\/boards\/(\d+)/.exec(url.pathname)?.[1];
+  return { site: url.host, project: project.toUpperCase(), board: board ? Number(board) : null };
+}
+
 // The token's key in the credentials file: one per site and account, so a
 // site may be signed in with one account for this root and another for the machine.
 export const secretKey = (site: string, email: string): string => `${siteKey(site)}/${email.toLowerCase()}`;

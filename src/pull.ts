@@ -848,7 +848,8 @@ function attachmentsFor(context: Context, issue: Issue, task: TaskView | null): 
       if (!attachment) return null;
       const file = files.find((held) => held.name === assetName(attachment));
       // one in the root is drawn as an image where it is one; one in Jira stays a link, since the page cannot read it without the person's Jira sign-in
-      if (file && task) return { label: attachment.filename, href: path.relative(folder, path.join(context.host.context().root, file.path)).split(path.sep).join('/'), image: IMAGE.test(attachment.filename) };
+      if (file && task)
+        return { label: attachment.filename, href: path.relative(folder, path.join(context.host.context().root, file.path)).split(path.sep).join('/'), image: IMAGE.test(attachment.filename) };
       return { label: attachment.filename, href: `${base}/rest/api/3/attachment/content/${attachment.id}` };
     },
   };

@@ -17,9 +17,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "eidosmd": "^0.16.1",
+    "eidosmd": "link:../eidosmd/cli",
     "esbuild": "^0.28.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "@types/react": "^18.3.12"
   },
   "engines": {
     "node": ">=22.6"

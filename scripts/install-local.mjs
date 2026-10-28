@@ -16,5 +16,5 @@ const appData =
       : path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), '.config'), 'eidosmd'));
 const dir = path.join(appData, 'plugins', 'jira', version);
 mkdirSync(dir, { recursive: true });
-for (const file of ['manifest.yaml', 'cli.js', 'instructions.md']) copyFileSync(path.join('dist', file), path.join(dir, file));
+for (const file of ['manifest.yaml', 'cli.js', 'app.js', 'page.js', 'instructions.md']) copyFileSync(path.join('dist', file), path.join(dir, file));
 console.log(`installed jira ${version} in ${dir}`);

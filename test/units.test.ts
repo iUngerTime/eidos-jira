@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { adfToMarkdown } from '../src/adf.ts';
 import { siteBase } from '../src/client.ts';
-import { opposed, readConnection, type Connection } from '../src/connections.ts';
+import { fromBoardUrl, opposed, readConnection, type Connection } from '../src/connections.ts';
 import type { Description } from '../src/describe.ts';
 import { checkMapping, draftMapping, priorityFor, statusFor, typeFor } from '../src/mapping.ts';
 import { jqlMoment, moment } from '../src/pull.ts';
@@ -53,7 +53,10 @@ test('Jira Pull REQ7: a document reads as markdown, a mention as the alias, a fi
   const out = adfToMarkdown(doc, { mention: (id) => (id === 'acc-1' ? 'ada' : null), media: (_id, alt) => (alt ? { label: alt, href: `files/${alt}` } : null) });
   assert.equal(out, ['### Title', '**bold** and `code` by @ada', '1. one\n2. two', '> quoted', '| a | b |\n| --- | --- |\n| 1 | 2\\|3 |', '[shot.png](files/shot.png)', 'still read'].join('\n\n'));
   assert.equal(
-    adfToMarkdown({ type: 'doc', content: [{ type: 'mediaSingle', content: [{ type: 'media', attrs: { id: 'm', alt: 'a.png' } }] }] }, { mention: () => null, media: () => ({ label: 'a.png', href: '../assets/a.png', image: true }) }),
+    adfToMarkdown(
+      { type: 'doc', content: [{ type: 'mediaSingle', content: [{ type: 'media', attrs: { id: 'm', alt: 'a.png' } }] }] },
+      { mention: () => null, media: () => ({ label: 'a.png', href: '../assets/a.png', image: true }) },
+    ),
     '![a.png](../assets/a.png)',
     'an image in the root is written as an image',
   );
@@ -182,4 +185,11 @@ test('Jira REQ16, Jira Pull REQ3: a site is a Jira Cloud address; a watermark is
   assert.equal(jqlMoment(new Date('2026-10-27T03:04:00Z'), 'America/Sao_Paulo'), '2026-10-27 00:04');
   assert.equal(moment('2026-10-01T09:00:00.123+0530'), '2026-10-01T09:00:00+05:30');
   assert.equal(moment('2026-10-01T09:00:00Z'), '2026-10-01T09:00:00+00:00');
+});
+
+test("Jira REQ2: a board's address as Jira shows it reads as its site, project, and board; anything else is not one", () => {
+  assert.deepEqual(fromBoardUrl('https://acme.atlassian.net/jira/software/projects/acme/boards/12?selectedIssue=ACME-1'), { site: 'acme.atlassian.net', project: 'ACME', board: 12 });
+  assert.deepEqual(fromBoardUrl('https://acme.atlassian.net/jira/software/projects/ACME/list'), { site: 'acme.atlassian.net', project: 'ACME', board: null });
+  assert.equal(fromBoardUrl('acme.atlassian.net'), null);
+  assert.equal(fromBoardUrl('https://acme.atlassian.net/wiki/spaces/X'), null);
 });

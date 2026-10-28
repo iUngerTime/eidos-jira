@@ -15,13 +15,15 @@ import {
   saveSignIn,
   SCOPE_WORDS,
   signIn,
+  signedInSites,
+  type Scope,
   siteKey,
   writeConnections,
   type Connection,
   type MappingPart,
 } from './connections.ts';
 import { cachedDescription, keepDescription, readDescription, type Description } from './describe.ts';
-import { checkMapping, draftMapping, type MappingProblem } from './mapping.ts';
+import { checkMapping, draftMapping, type DraftEntry, type MappingProblem } from './mapping.ts';
 import { ask, confirm, readLines } from './prompt.ts';
 import { readState, run, writeState, type Done, type Plan } from './pull.ts';
 import { tokensFile } from './tokens.ts';
@@ -33,6 +35,25 @@ export interface JiraApi {
   pull(name?: string, options?: { full?: boolean; keepLocal?: boolean }): Promise<Done[]>;
   // what the Backlog's head says per pull connection: the last fetch's count, or why it failed
   status(): Array<{ connection: string; last_pull: string | null; last_fetch: { at: string; count: number; error?: string } | null }>;
+  // The settings page's half (the app entry's routes answer through these, as the commands do)
+  // each site this root's connections use or a sign-in names, with who signs in there and where that is kept
+  signIns(): SignInRow[];
+  login(site: string, email: string, token: string, global: boolean): Promise<{ site: string; email: string; name: string }>;
+  logout(site: string): Promise<string[]>;
+  connect(input: { name: string; site: string; project: string; board?: string | number; jql?: string; direction?: 'pull' | 'push'; restricted_comments?: boolean }): Promise<Connection>;
+  disconnect(name: string): Promise<void>;
+  describe(name: string, refresh: boolean): Promise<Description>;
+  draft(name: string): Promise<{ entries: DraftEntry[]; unmatched: string[] }>;
+  accept(name: string, entries: Array<Pick<DraftEntry, 'part' | 'jira' | 'eidos'>>): Promise<Connection>;
+  setPair(name: string, part: MappingPart | 'parent', jira: string, eidos: string | null): Promise<{ connection: Connection; problems: MappingProblem[] }>;
+  problems(name: string): MappingProblem[];
+}
+
+export interface SignInRow {
+  site: string;
+  email: string | null;
+  kept: string | null;
+  scope: Scope | null;
 }
 
 const SETTINGS_PATH = '.eidos/plugins/jira/settings.yaml';
@@ -188,6 +209,80 @@ const entry: CliEntry = {
             const state = readState(host.workspace, entry.name);
             return { connection: entry.name, last_pull: state.last_pull ?? null, last_fetch: state.last_fetch ?? null };
           }),
+      signIns: () => {
+        const sites = [...new Set([...connections(host).map((entry) => siteKey(entry.site)), ...signedInSites(host)])];
+        return sites.map((site) => {
+          const found = signIn(host, site);
+          return { site, email: found?.email ?? null, kept: found ? SCOPE_WORDS[found.scope] : null, scope: found?.scope ?? null };
+        });
+      },
+      login: async (site, email, token, global) => {
+        if (!email.trim() || !token.trim()) throw new Error('an email and a token are both needed');
+        const client = jiraClient(site, { email: email.trim(), token: token.trim() }, siteKey(site));
+        const me = await client.get<{ displayName?: string }>('/rest/api/3/myself').catch((error: unknown) => {
+          if (error instanceof JiraError && error.status === 401) throw new Error(`${siteKey(site)} did not accept that email and token`);
+          throw error;
+        });
+        await saveSignIn(host, site, { email: email.trim(), token: token.trim() }, global);
+        return { site: siteKey(site), email: email.trim(), name: me.displayName ?? email.trim() };
+      },
+      logout: (site) => removeSignIn(host, site),
+      connect: async (input) => {
+        const made = readConnection({ ...input, direction: input.direction ?? 'pull', mapping: {} });
+        if (!made) throw new Error('a connection needs a name, a site, and a project');
+        const all = connections(host);
+        if (all.some((held) => held.name.toLowerCase() === made.name.toLowerCase())) throw new Error(`a connection called ${made.name} is already here`);
+        await writeConnections(host, [...all, made]);
+        return made;
+      },
+      disconnect: async (name) => {
+        const found = connectionNamed(host, name);
+        await writeConnections(
+          host,
+          connections(host).filter((held) => held.name !== found.name),
+        );
+      },
+      describe: (name, refresh) => description(connectionNamed(host, name), refresh),
+      draft: async (name) => {
+        const connection = connectionNamed(host, name);
+        return draftMapping(connection, backlogOf(host).settings(), await description(connection, false));
+      },
+      accept: async (name, entries) => {
+        const connection = connectionNamed(host, name);
+        const next = { ...connection, mapping: { ...connection.mapping } };
+        for (const proposed of entries) {
+          const rest = (next.mapping[proposed.part] ?? []).filter((pair) => pair.jira.toLowerCase() !== proposed.jira.toLowerCase());
+          next.mapping[proposed.part] = [...rest, { jira: proposed.jira, eidos: proposed.eidos }];
+        }
+        await writeConnections(
+          host,
+          connections(host).map((held) => (held.name === connection.name ? next : held)),
+        );
+        return next;
+      },
+      setPair: async (name, part, from, to) => {
+        const connection = connectionNamed(host, name);
+        const next = { ...connection, mapping: { ...connection.mapping } };
+        if (part === 'parent') {
+          if (to === null) delete next.mapping.parent;
+          else if (from === 'subtasks' || from === 'all' || from === 'none') next.mapping.parent = from;
+          else throw new Error('parent is subtasks, all, or none');
+        } else {
+          if (!(MAPPING_PARTS as readonly string[]).includes(part)) throw new Error(`a part is one of ${[...MAPPING_PARTS, 'parent'].join(', ')}`);
+          if (!from) throw new Error('name the Jira side');
+          const rest = (next.mapping[part] ?? []).filter((pair) => pair.jira.toLowerCase() !== from.toLowerCase());
+          next.mapping[part] = to === null ? rest : [...rest, { jira: from, eidos: to }];
+        }
+        await writeConnections(
+          host,
+          connections(host).map((held) => (held.name === connection.name ? next : held)),
+        );
+        return { connection: next, problems: checkMapping(next, backlogOf(host).settings(), cachedDescription(host.workspace, connection.name)) };
+      },
+      problems: (name) => {
+        const connection = connectionNamed(host, name);
+        return checkMapping(connection, backlogOf(host).settings(), cachedDescription(host.workspace, connection.name));
+      },
     };
 
     host.command((command) => {
@@ -211,14 +306,8 @@ const entry: CliEntry = {
               if (!email) email = lines.shift() ?? '';
               token = lines.shift() ?? '';
             }
-            if (!email || !token) throw new Error('an email and a token are both needed');
-            const client = jiraClient(site, { email, token }, siteKey(site));
-            const me = await client.get<{ displayName?: string; emailAddress?: string }>('/rest/api/3/myself').catch((error: unknown) => {
-              if (error instanceof JiraError && error.status === 401) throw new Error(`${siteKey(site)} did not accept that email and token`);
-              throw error;
-            });
-            await saveSignIn(host, site, { email, token }, options.global === true);
-            print(`Signed in to ${siteKey(site)} as ${me.displayName ?? email} (${email}), kept for ${options.global ? 'this machine' : 'this root'}, the token in ${tokensFile()}.`);
+            const me = await api.login(site, email, token, options.global === true);
+            print(`Signed in to ${me.site} as ${me.name} (${me.email}), kept for ${options.global ? 'this machine' : 'this root'}, the token in ${tokensFile()}.`);
           }),
         );
 
@@ -228,7 +317,7 @@ const entry: CliEntry = {
         .description("remove this root's and this machine's sign-in to a site, and its tokens from the credentials file")
         .action(
           action(async (site: string) => {
-            const out = await removeSignIn(host, site);
+            const out = await api.logout(site);
             print(out.length > 0 ? `Signed out of ${siteKey(site)}: ${out.join(', ')}.` : `Nobody was signed in to ${siteKey(site)} here.`);
           }),
         );
@@ -239,11 +328,7 @@ const entry: CliEntry = {
         .description("each site this root's connections use, with the account and where it is kept")
         .action(
           action((options: { json?: boolean }) => {
-            const sites = [...new Set(connections(host).map((entry) => siteKey(entry.site)))];
-            const rows = sites.map((site) => {
-              const found = signIn(host, site);
-              return { site, email: found?.email ?? null, kept: found ? SCOPE_WORDS[found.scope] : null };
-            });
+            const rows = api.signIns().map(({ site, email, kept }) => ({ site, email, kept }));
             if (options.json) return json(rows);
             if (rows.length === 0) return print('This root has no Jira connection; eidos jira connect adds one.');
             for (const row of rows) print(row.email ? `${row.site}: ${row.email}, kept for ${row.kept}` : `${row.site}: nobody signed in (eidos jira login ${row.site})`);
@@ -263,20 +348,15 @@ const entry: CliEntry = {
         .action(
           action(async (name: string, options: { site: string; project: string; board?: string; jql?: string; direction: string; restrictedComments?: boolean }) => {
             if (options.direction !== 'pull' && options.direction !== 'push') throw new Error('a direction is pull or push');
-            const made = readConnection({
+            const made = await api.connect({
+              direction: options.direction,
               name,
               site: options.site,
               project: options.project,
-              board: options.board,
-              jql: options.jql,
-              direction: options.direction,
+              ...(options.board ? { board: options.board } : {}),
+              ...(options.jql ? { jql: options.jql } : {}),
               restricted_comments: options.restrictedComments === true,
-              mapping: {},
             });
-            if (!made) throw new Error('a connection needs a name, a site, and a project');
-            const all = connections(host);
-            if (all.some((held) => held.name.toLowerCase() === name.toLowerCase())) throw new Error(`a connection called ${name} is already here`);
-            await writeConnections(host, [...all, made]);
             print(
               `Added ${made.name}: ${made.direction} ${made.project} on ${siteKey(made.site)}${made.board ? `, board ${made.board}` : ''}. Next: eidos jira describe ${made.name}, then eidos jira map ${made.name}.`,
             );
@@ -290,10 +370,7 @@ const entry: CliEntry = {
         .action(
           action(async (name: string) => {
             const found = connectionNamed(host, name);
-            await writeConnections(
-              host,
-              connections(host).filter((held) => held.name !== found.name),
-            );
+            await api.disconnect(found.name);
             print(`Removed ${found.name}; the tasks it pulled stay where they are.`);
           }),
         );
@@ -341,12 +418,7 @@ const entry: CliEntry = {
               return;
             }
             if (accepted.length === 0) return;
-            const next = { ...connection, mapping: { ...connection.mapping } };
-            for (const proposed of accepted) next.mapping[proposed.part] = [...(next.mapping[proposed.part] ?? []), { jira: proposed.jira, eidos: proposed.eidos }];
-            await writeConnections(
-              host,
-              connections(host).map((held) => (held.name === connection.name ? next : held)),
-            );
+            await api.accept(connection.name, accepted);
             print(`${connection.name}: ${accepted.length} entries written to the mapping.`);
           }),
         );
@@ -362,27 +434,10 @@ const entry: CliEntry = {
         .action(
           action(async (name: string, operation: string, part: string, from?: string, to?: string) => {
             const connection = connectionNamed(host, name);
-            const next = { ...connection, mapping: { ...connection.mapping } };
-            if (part === 'parent') {
-              if (operation === 'unset') delete next.mapping.parent;
-              else if (from === 'subtasks' || from === 'all' || from === 'none') next.mapping.parent = from;
-              else throw new Error('parent is subtasks, all, or none');
-            } else {
-              if (!(MAPPING_PARTS as readonly string[]).includes(part)) throw new Error(`a part is one of ${[...MAPPING_PARTS, 'parent'].join(', ')}`);
-              if (!from) throw new Error('name the Jira side');
-              const key = part as MappingPart;
-              const rest = (next.mapping[key] ?? []).filter((pair) => pair.jira.toLowerCase() !== from.toLowerCase());
-              if (operation === 'set') {
-                if (!to) throw new Error('name the Eidos side to set it to');
-                next.mapping[key] = [...rest, { jira: from, eidos: to }];
-              } else if (operation === 'unset') next.mapping[key] = rest;
-              else throw new Error('the operation is set or unset');
-            }
-            const problems = checkMapping(next, backlogOf(host).settings(), cachedDescription(host.workspace, connection.name));
-            await writeConnections(
-              host,
-              connections(host).map((held) => (held.name === connection.name ? next : held)),
-            );
+            if (operation !== 'set' && operation !== 'unset') throw new Error('the operation is set or unset');
+            if (part !== 'parent' && operation === 'set' && !to) throw new Error('name the Eidos side to set it to');
+            const unset = operation === 'unset';
+            const { problems } = await api.setPair(connection.name, part as MappingPart | 'parent', from ?? '', unset ? null : part === 'parent' ? (from ?? '') : (to ?? ''));
             print(`${connection.name}: ${part} ${operation === 'set' ? `${from} → ${part === 'parent' ? '' : to}` : `${from ?? ''} unset`}`.trim());
             for (const problem of problems) print(`  jira/${problem.code}: ${problem.message}`);
           }),

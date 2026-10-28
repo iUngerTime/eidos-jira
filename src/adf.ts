@@ -15,8 +15,9 @@ export interface AdfNode {
 export interface AdfContext {
   // a Jira account id to the alias of the root user matched to it; null leaves the mention's own text
   mention(accountId: string, text: string): string | null;
-  // an embedded file (its media id and the file name Jira shows as its alt) to the address its link points at; null for none known
-  media(id: string, alt: string | null): { label: string; href: string } | null;
+  // an embedded file (its media id and the file name Jira shows as its alt) to the address its link points at, and
+  // whether it is drawn as an image there (one in the root); null for none known
+  media(id: string, alt: string | null): { label: string; href: string; image?: boolean } | null;
 }
 
 const NONE: AdfContext = { mention: () => null, media: () => null };
@@ -71,7 +72,7 @@ function inlineNode(node: AdfNode, context: AdfContext): string {
     case 'media':
     case 'mediaInline': {
       const found = context.media(str(node.attrs?.['id']), str(node.attrs?.['alt']) || null);
-      if (found) return `[${found.label}](${found.href})`;
+      if (found) return `${found.image ? '!' : ''}[${found.label}](${found.href})`;
       return str(node.attrs?.['alt']);
     }
     default:

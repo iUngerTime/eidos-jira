@@ -833,6 +833,8 @@ function assetFolder(context: Context): string | null {
 
 // Where an issue's embedded files point (REQ14): the attachment in Jira, or
 // its file in the root once a pull with pull_attachments downloaded it.
+const IMAGE = /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i;
+
 function attachmentsFor(context: Context, issue: Issue, task: TaskView | null): { link: AdfContext['media']; downloads: JiraAttachment[] } {
   const attachments = issue.fields.attachment ?? [];
   const base = siteBase(context.connection.site);
@@ -845,7 +847,8 @@ function attachmentsFor(context: Context, issue: Issue, task: TaskView | null): 
       const attachment = attachments.find((held) => alt !== null && held.filename === alt) ?? (attachments.length === 1 ? attachments[0] : undefined);
       if (!attachment) return null;
       const file = files.find((held) => held.name === assetName(attachment));
-      if (file && task) return { label: attachment.filename, href: path.relative(folder, path.join(context.host.context().root, file.path)).split(path.sep).join('/') };
+      // one in the root is drawn as an image where it is one; one in Jira stays a link, since the page cannot read it without the person's Jira sign-in
+      if (file && task) return { label: attachment.filename, href: path.relative(folder, path.join(context.host.context().root, file.path)).split(path.sep).join('/'), image: IMAGE.test(attachment.filename) };
       return { label: attachment.filename, href: `${base}/rest/api/3/attachment/content/${attachment.id}` };
     },
   };

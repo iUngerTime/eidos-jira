@@ -162,7 +162,7 @@ test('Jira Pull REQ1, REQ2, REQ4, REQ7 to REQ10: a fetch writes nothing; a pull 
   assert.match(story, /key: ACME-2/);
   assert.match(story, /parent: ACME-1/, "an epic's child keeps its epic in its jira key under the subtasks rule");
   assert.match(story, /Ask @Lin Example about \*\*SSO\*\*\./, 'a mention of someone the root does not have reads as Jira names them');
-  assert.match(story, /\[mockup\.png\]\(http:\/\/127\.0\.0\.1:\d+\/rest\/api\/3\/attachment\/content\/20001\)/, 'an attachment is linked to in Jira by default');
+  assert.match(story, /(?<!!)\[mockup\.png\]\(http:\/\/127\.0\.0\.1:\d+\/rest\/api\/3\/attachment\/content\/20001\)/, 'an attachment is linked to in Jira by default, a link and not an image');
   assert.match(story, /links:\n {2}- \{ type: blocks, task: T-ACME-3 \}/);
   assert.match(story, /^updated: 2026-10-01T09:00:00\+00:00$/m, "Jira's time, not the pull's");
   const subtask = readFileSync(taskFile('t-acme-2-1-'), 'utf8');
@@ -260,7 +260,7 @@ test('Jira Pull REQ14: with pull_attachments on, an attachment is downloaded int
   assert.match(pulled, /1 attachments downloaded/);
   assert.match(pulled, /1 changed/, 'a reference pointed at the file counts as a change');
   const story = readFileSync(taskFile('t-acme-2-ship'), 'utf8');
-  assert.match(story, /\[mockup\.png\]\(\.\.\/assets\/jira-20001-mockup\.png\)/);
+  assert.match(story, /!\[mockup\.png\]\(\.\.\/assets\/jira-20001-mockup\.png\)/, 'an image in the root is drawn as one');
   touch(fake.state, 'ACME-2', {}, jiraNow());
   assert.doesNotMatch(await ok(['jira', 'pull']), /attachments downloaded/, 'not downloaded again');
   // a comment or a description with a mention and a file reads as the pull writes it, so nothing is counted to change

@@ -52,6 +52,11 @@ test('Jira Pull REQ7: a document reads as markdown, a mention as the alias, a fi
   };
   const out = adfToMarkdown(doc, { mention: (id) => (id === 'acc-1' ? 'ada' : null), media: (_id, alt) => (alt ? { label: alt, href: `files/${alt}` } : null) });
   assert.equal(out, ['### Title', '**bold** and `code` by @ada', '1. one\n2. two', '> quoted', '| a | b |\n| --- | --- |\n| 1 | 2\\|3 |', '[shot.png](files/shot.png)', 'still read'].join('\n\n'));
+  assert.equal(
+    adfToMarkdown({ type: 'doc', content: [{ type: 'mediaSingle', content: [{ type: 'media', attrs: { id: 'm', alt: 'a.png' } }] }] }, { mention: () => null, media: () => ({ label: 'a.png', href: '../assets/a.png', image: true }) }),
+    '![a.png](../assets/a.png)',
+    'an image in the root is written as an image',
+  );
   assert.equal(adfToMarkdown(null), '');
   assert.equal(adfToMarkdown('plain'), 'plain');
 });

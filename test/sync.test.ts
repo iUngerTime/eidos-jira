@@ -202,6 +202,9 @@ test('Jira Push REQ3, REQ5: a create is planned first; a Backlog type several Ji
   assert.match(ambiguous.stdout, /default is Epic or Story or Bug in Jira/);
   assert.match(ambiguous.stdout, /set create.types default "<Jira type>"/);
   assert.match(ambiguous.stdout, /Nothing created/);
+  // the page settles the same blocker from the choices it carries
+  const asked = JSON.parse((await eidos(['jira', 'create', task.id, '--connection', 'acme', '--json'])).stdout) as { plans: Array<{ blockers: Array<{ ask?: { kind: string; choices: string[] } }> }> };
+  assert.deepEqual(asked.plans[0]!.blockers[0]!.ask, { kind: 'type', choices: ['Epic', 'Story', 'Bug'] });
   const plan = await ok(['jira', 'create', task.id, '--connection', 'acme', '--type', 'Story']);
   assert.match(plan, /a new Story in ACME/);
   assert.match(plan, /summary +Add a passkey sign-in/);

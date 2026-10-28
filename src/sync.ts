@@ -66,7 +66,7 @@ export interface Blocker {
   message: string;
   fix: string;
   // what the page offers to settle it: a status to go to, a status to pass through, or a screen field's value
-  ask?: { kind: 'status_to' | 'via' | 'field'; field?: string; choices: string[] };
+  ask?: { kind: 'status_to' | 'via' | 'field' | 'type'; field?: string; choices: string[] };
 }
 
 export interface CommentPlan {
@@ -467,6 +467,7 @@ function transitionValues(context: Context, hop: Transition, options: SyncOption
               side: 'status',
               code: 'required',
               message: `the transition to ${hop.to.name} asks for ${field.name ?? id}, which the issue does not have`,
+              ask: { kind: 'field', field: id, choices: [] },
               fix: `assign the task and sync again, or --field ${id}=<person>`,
             },
           };

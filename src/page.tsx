@@ -32,6 +32,7 @@ import {
   Stack,
   Switch,
   Text,
+  useOpen,
   usePluginEvent,
   usePluginHost,
   type PagePlugin,
@@ -128,9 +129,46 @@ interface SyncPlanView {
   fields: Array<{ side: string; jira: string; verdict: 'unchanged' | 'from-jira' | 'to-jira' | 'same' | 'conflict'; eidos: string; remote: string; seen: string; reason?: string; kept?: boolean }>;
   status: { from: string; to: string; path: string[] } | null;
   comments: Array<{ index: number; text: string }>;
-  blockers: Array<{ side: string | null; code: string; message: string; fix: string; ask?: { kind: 'status_to' | 'via' | 'field'; field?: string; choices: string[] } }>;
+  blockers: Blocker[];
   loss: Record<string, Array<{ kind: string; count: number }>>;
   level: boolean;
+}
+// what stops a sync or a create, and what the page offers to settle it
+interface Ask {
+  kind: 'status_to' | 'via' | 'field' | 'type';
+  field?: string;
+  choices: string[];
+}
+interface Blocker {
+  side: string | null;
+  code: string;
+  message: string;
+  fix: string;
+  ask?: Ask;
+}
+// what the plugin's `task` route answers for the open file (its TaskLink)
+interface TaskLink {
+  task: string;
+  title: string;
+  key: string | null;
+  url: string | null;
+  connection: string | null;
+  pending: boolean;
+}
+// what the plugin's `create-plan` route answers (its CreatePlan), and what a create settles
+interface CreatePlanView {
+  task: string;
+  connection: string;
+  type: string | null;
+  fields: Array<{ jira: string; value: string; from: 'task' | 'default' | 'option' }>;
+  parent: string | null;
+  later: string[];
+  blockers: Blocker[];
+  recovering: boolean;
+}
+interface CreateChoices {
+  type?: string;
+  fields: Record<string, string>;
 }
 // what a review settles, sent with every plan it asks for and with the sync
 interface SyncChoices {
@@ -214,6 +252,8 @@ function JiraView(): JSX.Element {
   const { busy, act } = useActions(host);
   const [found, setFound] = useState<Record<string, number>>({});
   const [reviewing, setReviewing] = useState<string | null>(null);
+  const [creating, setCreating] = useState<TaskLink | null>(null);
+  const link = useTaskLink(state);
   const fetchOne = (name: string): Promise<void> =>
     act(
       `fetch:${name}`,
@@ -259,6 +299,46 @@ function JiraView(): JSX.Element {
   else
     body = (
       <Stack gap="md" pad="sm">
+        {link ? (
+          <Card data-testid="jira-this-task">
+            <Stack gap="xs">
+              <Text size="xs" tone="muted" block>
+                {t('thisTask')}
+              </Text>
+              <Text weight="strong" block>
+                {link.title}
+              </Text>
+              <Text size="sm" tone="muted" block>
+                {link.key ? t('inJiraAs', { key: link.key }) : link.pending ? t('createCutShort') : t('notInJira')}
+              </Text>
+              {link.key && !link.connection && (
+                <Text size="xs" tone="error" block>
+                  {t('noBoardReaches')}
+                </Text>
+              )}
+              <Row>
+                {link.key ? (
+                  <>
+                    <Button size="sm" variant="primary" disabled={busy !== null || !link.connection} onClick={() => setReviewing(link.task)} data-testid="jira-sync-task">
+                      {t('syncWithJira')}
+                    </Button>
+                    <Button size="sm" variant="quiet" onClick={() => window.open(link.url!, '_blank', 'noopener')}>
+                      {t('openInJira')}
+                    </Button>
+                  </>
+                ) : (
+                  <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => setCreating(link)} data-testid="jira-create-task">
+                    {t(link.pending ? 'finishCreate' : 'createInJira')}
+                  </Button>
+                )}
+              </Row>
+            </Stack>
+          </Card>
+        ) : (
+          <Text size="xs" tone="faint" block>
+            {t('openTaskHint')}
+          </Text>
+        )}
         {state.connections.map((connection) => {
           const lastFetch = connection.status?.last_fetch;
           const waiting = found[connection.name] ?? (lastFetch && !lastFetch.error ? lastFetch.count : null);
@@ -332,6 +412,17 @@ function JiraView(): JSX.Element {
           onClose={() => setReviewing(null)}
           onSynced={() => {
             setReviewing(null);
+            reload();
+          }}
+        />
+      )}
+      {creating && state && (
+        <CreateReview
+          link={creating}
+          connections={state.connections.map((connection) => connection.name)}
+          onClose={() => setCreating(null)}
+          onCreated={() => {
+            setCreating(null);
             reload();
           }}
         />
@@ -465,25 +556,15 @@ function SyncReview(props: { task: string; onClose: () => void; onSynced: () => 
                     <Text size="sm">{t('acceptLoss')}</Text>
                   </Row>
                 )}
-                {blocker.ask && blocker.ask.choices.length > 0 ? (
-                  <Select
-                    aria-label={t(`ask_${blocker.ask.kind}`)}
-                    value=""
-                    onChange={(event: { target: HTMLSelectElement }) => {
-                      const value = event.target.value;
-                      if (!value) return;
+                {blocker.ask ? (
+                  <BlockerAsk
+                    ask={blocker.ask}
+                    onChoose={(value) => {
                       if (blocker.ask!.kind === 'status_to') setChoices({ ...choices, status_to: value });
                       else if (blocker.ask!.kind === 'via') setChoices({ ...choices, via: [...(choices.via ?? []), value] });
                       else setChoices({ ...choices, fields: { ...choices.fields, [blocker.ask!.field ?? '']: value } });
                     }}
-                  >
-                    <option value="">{t(`ask_${blocker.ask.kind}`)}</option>
-                    {blocker.ask.choices.map((choice) => (
-                      <option key={choice} value={choice}>
-                        {choice}
-                      </option>
-                    ))}
-                  </Select>
+                  />
                 ) : (
                   blocker.code !== 'loss' && (
                     <Text size="xs" tone="faint" block>
@@ -528,6 +609,213 @@ function SyncReview(props: { task: string; onClose: () => void; onSynced: () => 
       }
     >
       <Card variant="home">{body}</Card>
+    </Modal>
+  );
+}
+
+// What a blocker asks the person for: one of the values Jira lists, or a value typed where it lists none.
+function BlockerAsk(props: { ask: Ask; onChoose: (value: string) => void }): JSX.Element {
+  const { t } = usePluginHost();
+  const [typed, setTyped] = useState('');
+  if (props.ask.choices.length > 0)
+    return (
+      <Select
+        aria-label={t(`ask_${props.ask.kind}`)}
+        value=""
+        onChange={(event: { target: HTMLSelectElement }) => {
+          if (event.target.value) props.onChoose(event.target.value);
+        }}
+      >
+        <option value="">{t(`ask_${props.ask.kind}`)}</option>
+        {props.ask.choices.map((choice) => (
+          <option key={choice} value={choice}>
+            {choice}
+          </option>
+        ))}
+      </Select>
+    );
+  const label = t('fieldValue', { field: props.ask.field ?? '' });
+  return (
+    <Row>
+      <Input placeholder={label} aria-label={label} value={typed} onChange={(event: { target: HTMLInputElement }) => setTyped(event.target.value)} />
+      <Button size="sm" disabled={!typed.trim()} onClick={() => props.onChoose(typed.trim())}>
+        {t('setValue')}
+      </Button>
+    </Row>
+  );
+}
+
+// The task the open file holds, as the sidebar offers it to sync or to create, read again whenever the plugin's state is.
+function useTaskLink(state: State | null): TaskLink | null {
+  const host = useHostRef(usePluginHost());
+  const open = useOpen() as { file?: string };
+  const file = open.file ?? null;
+  const [link, setLink] = useState<TaskLink | null>(null);
+  useEffect(() => {
+    if (!file) {
+      setLink(null);
+      return;
+    }
+    let live = true;
+    host.current.get<{ task: TaskLink | null }>(`task?file=${encodeURIComponent(file)}`).then(
+      (answer) => {
+        if (live) setLink(answer.task);
+      },
+      () => {
+        if (live) setLink(null);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [host, file, state]);
+  return link;
+}
+
+// ---- the create review ------------------------------------------------------------------
+
+// One task's create as the person reviews it (Jira Push): the board it goes to, the issue type, each value sent, and a
+// value for each field Jira requires that the task does not hold; Create once nothing stops it.
+function CreateReview(props: { link: TaskLink; connections: string[]; onClose: () => void; onCreated: () => void }): JSX.Element {
+  const host = usePluginHost();
+  const hostRef = useHostRef(host);
+  const { t } = host;
+  const [connection, setConnection] = useState(props.link.connection ?? props.connections[0] ?? '');
+  const [choices, setChoices] = useState<CreateChoices>({ fields: {} });
+  const [plan, setPlan] = useState<CreatePlanView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  useEffect(() => {
+    let live = true;
+    setError(null);
+    setPlan(null);
+    hostRef.current.post<CreatePlanView>('create-plan', { task: props.link.task, connection, options: choices }).then(
+      (next) => {
+        if (live) setPlan(next);
+      },
+      (cause) => {
+        if (live) setError(reason(cause));
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [hostRef, props.link.task, connection, choices]);
+  const create = async (): Promise<void> => {
+    setCreating(true);
+    try {
+      const answer = await host.post<{ created: { key: string; differs: string[] } }>('create', { task: props.link.task, connection, options: choices });
+      host.toast(t('createdTitle', { key: answer.created.key }), 'success', answer.created.differs.length > 0 ? t('createdDiffers', { fields: answer.created.differs.join(', ') }) : undefined);
+      props.onCreated();
+    } catch (cause) {
+      host.toast(t('failed'), 'error', reason(cause));
+    } finally {
+      setCreating(false);
+    }
+  };
+  let body: JSX.Element;
+  if (error) body = <Notice>{error}</Notice>;
+  else if (!plan)
+    body = (
+      <Stack pad="sm">
+        <SkeletonBar width="70%" />
+        <SkeletonBar width="50%" />
+      </Stack>
+    );
+  else
+    body = (
+      <Stack gap="sm">
+        {plan.recovering && (
+          <Text size="sm" tone="muted" block>
+            {t('createRecovering')}
+          </Text>
+        )}
+        {plan.type && (
+          <Text size="sm" block>
+            {t('createType', { type: plan.type })}
+          </Text>
+        )}
+        {plan.parent && (
+          <Text size="sm" block>
+            {t('createParent', { key: plan.parent })}
+          </Text>
+        )}
+        {plan.fields.map((field) => (
+          <Text key={field.jira} size="sm" tone="muted" block>
+            {`${field.jira}: ${field.value}`}
+          </Text>
+        ))}
+        {plan.later.length > 0 && (
+          <Text size="xs" tone="faint" block>
+            {t('createLater', { fields: plan.later.join(', ') })}
+          </Text>
+        )}
+        {plan.blockers.map((blocker) => (
+          <Notice key={blocker.message}>
+            <Stack gap="xs">
+              <Text size="sm" block>
+                {blocker.message}
+              </Text>
+              {blocker.ask ? (
+                <BlockerAsk
+                  ask={blocker.ask}
+                  onChoose={(value) => {
+                    if (blocker.ask!.kind === 'type') setChoices({ ...choices, type: value });
+                    else setChoices({ ...choices, fields: { ...choices.fields, [blocker.ask!.field ?? '']: value } });
+                  }}
+                />
+              ) : (
+                <Text size="xs" tone="faint" block>
+                  {blocker.fix}
+                </Text>
+              )}
+            </Stack>
+          </Notice>
+        ))}
+      </Stack>
+    );
+  return (
+    <Modal
+      size="lg"
+      title={t('createTitle', { task: props.link.task })}
+      onClose={props.onClose}
+      foot={
+        <Row justify="between">
+          <Row>
+            {choices.type ? (
+              <Button size="sm" variant="quiet" onClick={() => setChoices({ ...choices, type: undefined })}>
+                {t('ask_type')}
+              </Button>
+            ) : null}
+          </Row>
+          <Row>
+            <Button variant="quiet" onClick={props.onClose}>
+              {t('cancel')}
+            </Button>
+            <Button variant="primary" disabled={creating || plan === null || plan.blockers.length > 0} onClick={() => void create()} data-testid="jira-create">
+              {t(creating ? 'creating' : 'create')}
+            </Button>
+          </Row>
+        </Row>
+      }
+    >
+      <Stack gap="sm">
+        {props.connections.length > 1 && !props.link.pending && (
+          <SettingRow
+            label={t('createBoard')}
+            control={
+              <Select aria-label={t('createBoard')} value={connection} onChange={(event: { target: HTMLSelectElement }) => setConnection(event.target.value)}>
+                {props.connections.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </Select>
+            }
+          />
+        )}
+        <Card variant="home">{body}</Card>
+      </Stack>
     </Modal>
   );
 }

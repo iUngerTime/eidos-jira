@@ -101,6 +101,7 @@ function typeOfTask(context: Context, description: Description, task: TaskView, 
         side: 'type',
         code: 'unmapped',
         message: `${wanted} does not read back as the task's type ${task.type} (${back.map((type) => type.name).join(', ') || 'no Jira type does'})`,
+        ...(back.length > 0 ? { ask: { kind: 'type' as const, choices: back.map((type) => type.name) } } : {}),
         fix: `--type "<one of ${back.map((type) => type.name).join(', ')}>", or eidos jira configure:map ${name} set types "<Jira type>" ${task.type}`,
       },
     };
@@ -114,6 +115,7 @@ function typeOfTask(context: Context, description: Description, task: TaskView, 
       side: 'type',
       code: pool.length === 0 ? 'unmapped' : 'ambiguous',
       message: pool.length === 0 ? `no Jira issue type reads as the task type ${task.type}` : `${task.type} is ${pool.map((type) => type.name).join(' or ')} in Jira`,
+      ...(pool.length > 0 ? { ask: { kind: 'type' as const, choices: pool.map((type) => type.name) } } : {}),
       fix:
         pool.length === 0
           ? `eidos jira configure:map ${name} set types "<Jira type>" ${task.type}`
@@ -222,6 +224,7 @@ export async function prepareCreate(context: Context, task: TaskView, options: C
       side: null,
       code: 'required',
       message: `${type.name} requires ${field.name} (${field.id}), which the task does not hold`,
+      ask: { kind: 'field', field: field.id, choices: field.allowed ?? [] },
       fix: `--field ${field.id}="<${field.allowed ? field.allowed.join(' | ') : 'value'}>", or create_defaults in the mapping: eidos jira configure:map ${connection.name} set create.fields ${field.id} "<value>"`,
     });
   }

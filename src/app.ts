@@ -10,6 +10,7 @@ import type { JiraApi } from './index.ts';
 import type { MappingChoice } from './mapping.ts';
 import type { MappingPart } from './connections.ts';
 import type { SyncOptions } from './sync.ts';
+import type { CreateOptions } from './create.ts';
 
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
 
@@ -21,6 +22,18 @@ async function answer<T>(work: () => Promise<T> | T): Promise<T> {
     if (cause instanceof HostError) throw cause;
     throw new HostError(400, cause instanceof Error ? cause.message : String(cause));
   }
+}
+
+// The options a create is run with, as the page's review sends them: the issue type, the values Jira requires, and whether
+// a cut-short create whose issue cannot be found is made again.
+function createOptions(value: unknown): CreateOptions {
+  const held = typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const fields = typeof held['fields'] === 'object' && held['fields'] !== null && !Array.isArray(held['fields']) ? (held['fields'] as Record<string, unknown>) : {};
+  return {
+    ...(text(held['type']) ? { type: text(held['type']) } : {}),
+    fields: Object.fromEntries(Object.entries(fields).flatMap(([key, item]) => (text(item) ? [[key, text(item)]] : []))),
+    again: held['again'] === true,
+  };
 }
 
 const SETTINGS = ['pull_attachments', 'add_people', 'auto_fetch'] as const;
@@ -154,6 +167,18 @@ const entry: AppEntry<JiraApi> = {
       answer(async () => {
         const done = await api.sync(text(request.body['task']), syncOptions(request.body['options']));
         return { done, state: state(host, api) };
+      }),
+    );
+
+    // Jira Push from the page: the task the open file holds, then the plan of its create and the create itself
+    host.route('GET', 'task', (request) => answer(() => ({ task: api.taskAt(request.query.get('file') ?? '') })));
+    host.route('POST', 'create-plan', (request) =>
+      answer(async () => (await api.createPlan([text(request.body['task'])], text(request.body['connection']), createOptions(request.body['options'])))[0]),
+    );
+    host.route('POST', 'create', (request) =>
+      answer(async () => {
+        const created = (await api.create([text(request.body['task'])], text(request.body['connection']), createOptions(request.body['options'])))[0];
+        return { created, state: state(host, api) };
       }),
     );
 

@@ -77,6 +77,18 @@ export interface JiraApi {
   // Jira Push: what creating an issue from each task would send, and creating them once none is stopped
   createPlan(tasks: string[], connection: string, options?: CreateOptions): Promise<CreatePlan[]>;
   create(tasks: string[], connection: string, options?: CreateOptions): Promise<Created[]>;
+  // the task a file of the root holds, as the page shows it: the issue it is linked to, the create it waits on, or neither
+  taskAt(file: string): TaskLink | null;
+}
+
+export interface TaskLink {
+  task: string;
+  title: string;
+  key: string | null;
+  url: string | null;
+  // the connection it syncs through, or its cut-short create was made on; null when no connection here reaches it
+  connection: string | null;
+  pending: boolean;
 }
 
 export interface SyncStatus {
@@ -493,6 +505,28 @@ const entry: CliEntry = {
           });
           return { connection: connection.name, edited: editedHere({ backlog, connection }), pending, interrupted };
         });
+      },
+      taskAt: (file) => {
+        const wanted = file.replace(/\\/g, '/').toLowerCase();
+        const task = backlogOf(host)
+          .tasks()
+          .find((candidate) => {
+            const held = candidate.file.replace(/\\/g, '/').toLowerCase();
+            return held === wanted || held.endsWith(`/${wanted}`) || wanted.endsWith(`/${held}`);
+          });
+        if (!task) return null;
+        const held = heldOf(task);
+        const raw = task.properties['jira'] as { pending?: unknown; connection?: unknown } | null | undefined;
+        const pending = !held && typeof raw?.pending === 'string';
+        let connection: string | null = pending && typeof raw?.connection === 'string' ? raw.connection : null;
+        if (held) {
+          try {
+            connection = connectionOfTask(host, task).name;
+          } catch {
+            connection = null;
+          }
+        }
+        return { task: task.id ?? task.name, title: task.title, key: held?.key ?? null, url: held ? `https://${siteKey(held.site)}/browse/${held.key}` : null, connection, pending };
       },
       createPlan: async (refs, name, options = {}) => {
         const backlog = backlogOf(host);

@@ -661,20 +661,21 @@ const entry: CliEntry = {
         .command('connect')
         .argument('<name>', "the connection's name")
         .requiredOption('--site <site>', 'the Jira site, <name>.atlassian.net')
-        .requiredOption('--project <key>', "the project's key")
+        // `--project` is the host's, the project folder every command takes, so the Jira project goes by its key
+        .requiredOption('--key <key>', "the Jira project's key (ACME)")
         .option('--board <id>', 'a board whose filter sets the scope')
         .option('--jql <jql>', 'JQL that narrows the scope further')
         .option('--direction <direction>', 'pull (Jira to Eidos); push is not built yet', 'pull')
         .option('--restricted-comments', 'pull comments Jira restricts to a role or a group too')
         .description('add a connection to this root, shared with everyone in it')
         .action(
-          action(async (name: string, options: { site: string; project: string; board?: string; jql?: string; direction: string; restrictedComments?: boolean }) => {
+          action(async (name: string, options: { site: string; key: string; board?: string; jql?: string; direction: string; restrictedComments?: boolean }) => {
             if (options.direction !== 'pull' && options.direction !== 'push') throw new Error('a direction is pull or push');
             const made = await api.connect({
               direction: options.direction,
               name,
               site: options.site,
-              project: options.project,
+              project: options.key,
               ...(options.board ? { board: options.board } : {}),
               ...(options.jql ? { jql: options.jql } : {}),
               restricted_comments: options.restrictedComments === true,

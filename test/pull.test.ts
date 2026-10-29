@@ -110,8 +110,8 @@ test('Jira REQ5, REQ19: login checks the token against Jira and keeps it only in
 });
 
 test('Jira REQ2, REQ3: a connection is written to the shared settings; another over the same project the other way is refused', async () => {
-  await ok(['jira', 'connect', 'acme', '--site', fake.url, '--project', 'ACME', '--board', '1']);
-  const refused = await eidos(['jira', 'connect', 'acme-out', '--site', fake.url, '--project', 'ACME', '--direction', 'push']);
+  await ok(['jira', 'connect', 'acme', '--site', fake.url, '--key', 'ACME', '--board', '1']);
+  const refused = await eidos(['jira', 'connect', 'acme-out', '--site', fake.url, '--key', 'ACME', '--direction', 'push']);
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, /never pulls and pushes the same issues/);
   assert.match(await ok(['jira', 'whoami']), /tester@example.com, kept for this root/);

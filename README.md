@@ -29,7 +29,7 @@ Works from the terminal with Eidos MD 0.16.1 or later. Its pages in the app (the
 3. **Connect a board.** Paste the board's address (`…/projects/ACME/boards/12`) under **Boards** on the settings page, or:
 
    ```bash
-   eidos jira connect acme --site your-site.atlassian.net --project ACME --board 12
+   eidos jira connect acme --site your-site.atlassian.net --key ACME --board 12
    ```
 
 4. **Map it.** **Edit mapping** opens the board's mapping page: each Jira status, issue type, priority, and link type with the Backlog value it maps to, and each issue type's fields with where they land. From the terminal, `eidos jira describe acme` then `eidos jira map acme`.

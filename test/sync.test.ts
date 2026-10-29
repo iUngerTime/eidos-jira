@@ -72,7 +72,7 @@ before(async () => {
   await ok(['users', 'add', 'Tester', '--alias', 'tester', '--email', EMAIL]);
   await ok(['users', 'add', 'Ada Example', '--alias', 'ada']);
   await ok(['jira', 'login', fake.url], `${EMAIL}\n${TOKEN}\n`);
-  await ok(['jira', 'connect', 'acme', '--site', fake.url, '--project', 'ACME', '--board', '1']);
+  await ok(['jira', 'connect', 'acme', '--site', fake.url, '--key', 'ACME', '--board', '1']);
   await ok(['jira', 'describe', 'acme']);
   await ok(['jira', 'pull', 'acme']);
 });

@@ -9,6 +9,8 @@ import path from 'node:path';
 import type { Host } from 'eidosmd/plugin';
 import type { JiraApi } from './index.ts';
 import type { Blocker } from './sync.ts';
+import { connection as connectionNamed } from './connections.ts';
+import { pause, pauseOf, refusalOf } from './pause.ts';
 
 export interface Need {
   task: string;
@@ -60,8 +62,9 @@ function blockerLine(blocker: Blocker): string {
 export function startAutoSync(host: Host, api: JiraApi): () => void {
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   let queue: Promise<void> = Promise.resolve();
-  // the tasks edited here since their last pull or sync, read from the root alone, by task with their issue's key
-  const edited = (): Map<string, string> => new Map(api.syncStatus().flatMap((status) => status.edited.map((entry) => [entry.task, entry.key] as [string, string])));
+  // the tasks edited here since their last pull or sync, read from the root alone, by task with their issue's key and the connection they sync through
+  const edited = (): Map<string, { key: string; connection: string }> =>
+    new Map(api.syncStatus().flatMap((status) => status.edited.map((entry) => [entry.task, { key: entry.key, connection: status.connection }] as const)));
   // named once: a task already waiting for the same reason is not announced again at each save
   const needs = (task: string, key: string, reason: string): void => {
     const known = readNeeds(host.workspace).some((need) => need.task === task && need.reason === reason);
@@ -70,18 +73,26 @@ export function startAutoSync(host: Host, api: JiraApi): () => void {
     host.emit('changed', { task });
   };
   // the plan read first, so what stops the sync is named field by field in a line, and nothing is written while it does
-  const syncOne = async (task: string, key: string): Promise<void> => {
+  const syncOne = async (task: string, key: string, through: string | null): Promise<void> => {
+    // a connection Jira refused is not asked again until the person acts (Jira REQ23)
+    if (through && pauseOf(host, through)) return;
     try {
       const plan = await api.syncPlan(task, {});
       if (plan.blockers.length > 0) return needs(task, key, plan.blockers.map(blockerLine).join('; '));
       await api.sync(task, {});
     } catch (cause) {
+      // a refused sign-in pauses the site's connections rather than naming each task it stops; a 403 or 404 is the one issue's, a need
+      const refusal = refusalOf(cause, false);
+      if (refusal && through) {
+        pause(host, connectionNamed(host, through), refusal);
+        return;
+      }
       needs(task, key, (cause instanceof Error ? cause.message : String(cause)).replace(/^\S+ is not synced: /, ''));
     }
   };
-  const run = (tasks: Array<[string, string]>): void => {
+  const run = (tasks: Array<[string, { key: string; connection: string }]>): void => {
     queue = queue.then(async () => {
-      for (const [task, key] of tasks) await syncOne(task, key);
+      for (const [task, { key, connection }] of tasks) await syncOne(task, key, connection);
     });
   };
 
@@ -91,15 +102,16 @@ export function startAutoSync(host: Host, api: JiraApi): () => void {
     for (const file of paths) {
       const link = api.taskAt(file);
       if (!link?.key || link.skipped || !now.has(link.task)) continue;
+      if (link.connection && pauseOf(host, link.connection)) continue;
       const task = link.task;
-      const key = link.key;
       clearTimeout(timers.get(task));
       timers.set(
         task,
         setTimeout(() => {
           timers.delete(task);
           // edited still: a pull or a sync since the save may have settled it
-          if (edited().has(task)) run([[task, key]]);
+          const still = edited().get(task);
+          if (still) run([[task, still]]);
         }, SETTLE_MS),
       );
     }

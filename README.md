@@ -92,14 +92,15 @@ Both run only while the app has the root open, only for tasks edited here, never
 - **Comment threads.** One thread per issue, each comment signed by its author with Jira's date. Edits and deletions in Jira follow on the next pull. Comments restricted to a role or a group stay in Jira unless the connection sets `restricted_comments: true`.
 - **People.** An assignee, a comment's author, or a mention is written as the root user of the same name where your root has one, and as their Jira name otherwise.
 - **Sprints as milestones**, dated when the sprint ends.
-- **Attachments** are links to Jira, or downloaded into `assets/` when you turn on **Download attachments**. A downloaded image shows in place.
+- **Attachments** are links to Jira, or downloaded through the Assets plugin when you turn on **Download attachments**, into its first asset folder or the one you pick under **Attachments folder** (a folder of their own, if the root declares one). A downloaded image shows in place.
 - **Nothing is deleted.** An issue that leaves the board keeps its task, marked as gone, and comes back if it returns.
 
 ## Settings
 
 | Setting             | Where                | What it does                                                                                    |
 | ------------------- | -------------------- | ----------------------------------------------------------------------------------------------- |
-| `pull_attachments`  | shared with the root | Download each issue's attachments into `assets/` instead of linking to Jira.                    |
+| `pull_attachments`  | shared with the root | Download each issue's attachments through the Assets plugin instead of linking to Jira.         |
+| `attachments_folder` | shared with the root | The asset folder downloads go to; empty, the Assets plugin's first folder.                     |
 | `add_people`        | shared with the root | Add each person a pull finds that the root doesn't have to its users.                           |
 | `auto_fetch`        | yours                | Fetch every 5, 15, 30, or 60 minutes while the app has the root open. Nothing pulls on its own. |
 | `auto_sync_on_save` | yours                | Sync a task edited here a few seconds after its last save.                                      |

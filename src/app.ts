@@ -36,7 +36,7 @@ function createOptions(value: unknown): CreateOptions {
   };
 }
 
-const SETTINGS = ['pull_attachments', 'add_people', 'auto_fetch', 'auto_sync_on_save', 'auto_sync_on_push'] as const;
+const SETTINGS = ['pull_attachments', 'attachments_folder', 'add_people', 'auto_fetch', 'auto_sync_on_save', 'auto_sync_on_push'] as const;
 
 // The options a sync is run with, as the page's review sends them: only what it can choose, each checked here.
 function syncOptions(value: unknown): SyncOptions {
@@ -64,6 +64,7 @@ function syncOptions(value: unknown): SyncOptions {
 function state(host: AppHost, api: JiraApi): Record<string, unknown> {
   const status = api.status();
   const waiting = api.syncStatus();
+  const paused = api.pauses();
   return {
     sign_ins: api.signIns(),
     held: api.heldSignIns(),
@@ -72,9 +73,12 @@ function state(host: AppHost, api: JiraApi): Record<string, unknown> {
       problems: api.problems(connection.name),
       status: status.find((entry) => entry.connection === connection.name) ?? null,
       sync: waiting.find((entry) => entry.connection === connection.name) ?? null,
+      paused: paused.find((entry) => entry.connection === connection.name) ?? null,
     })),
     settings: Object.fromEntries(SETTINGS.map((name) => [name, host.settings().get(name)])),
     needs: api.needs(),
+    // the folders the Assets plugin manages, where downloaded attachments may go; null with the Assets plugin off
+    asset_folders: api.assetFolders(),
   };
 }
 
@@ -107,14 +111,27 @@ const entry: AppEntry<JiraApi> = {
         const fromUrl = text(request.body['url']) ? fromBoardUrl(text(request.body['url'])) : null;
         if (text(request.body['url']) && !fromUrl) throw new Error("that is not a Jira board's address (…/projects/<KEY>/boards/<n>)");
         const project = fromUrl?.project ?? text(request.body['project']);
+        const board = fromUrl?.board ?? request.body['board'];
+        // the name commands take: the project's key in lower case, with the board's id once another connection holds it
+        const base = text(request.body['name']) || project.toLowerCase();
+        const taken = new Set(api.connections().map((held) => held.name.toLowerCase()));
+        const name = taken.has(base.toLowerCase()) && board ? `${base}-${String(board)}` : base;
         const made = await api.connect({
-          name: text(request.body['name']) || project.toLowerCase(),
+          name,
+          ...(text(request.body['title']) ? { title: text(request.body['title']) } : {}),
           site: fromUrl?.site ?? text(request.body['site']),
           project,
-          ...((fromUrl?.board ?? request.body['board']) ? { board: String(fromUrl?.board ?? request.body['board']) } : {}),
+          ...(board ? { board: String(board) } : {}),
           ...(text(request.body['jql']) ? { jql: text(request.body['jql']) } : {}),
         });
         return { connection: made, state: state(host, api) };
+      }),
+    );
+    host.route('GET', 'boards', (request) => answer(() => api.boards(request.query.get('site') ?? undefined)));
+    host.route('POST', 'resume', (request) =>
+      answer(() => {
+        api.resume(text(request.body['name']));
+        return { state: state(host, api) };
       }),
     );
     host.route('POST', 'disconnect', (request) =>

@@ -16,6 +16,7 @@ import { cachedDescription, categoryOf } from './describe.ts';
 import { bundlesOf, checklistFromJira, partPairs, realField as realFieldOf, sectionOf, splitIssue } from './bundle.ts';
 import { DEFAULT_TYPE, fieldsFor, fieldsOf, linkTypeFor, priorityFor, statusFor, typeFor } from './mapping.ts';
 import type { AssetsApi, BacklogApi, BoardSettings, CommentsApi, TaskFields, TaskView, ThreadView } from './types.ts';
+import { lift } from './pause.ts';
 
 // ---- what Jira gives -----------------------------------------------------------------
 
@@ -135,6 +136,8 @@ export interface PullOptions {
 export interface State {
   last_pull?: string;
   last_fetch?: { at: string; count: number; error?: string };
+  // what runs on its own is held off this connection until the person acts (Jira REQ23)
+  paused?: { at: string; status: number | null; reason: string };
 }
 
 const stateFile = (workspace: string, name: string): string => path.join(workspace, 'local', `state-${name.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}.json`);
@@ -590,6 +593,8 @@ export async function run(context: Context, write: boolean, options: PullOptions
 
   if (!write) {
     writeState(host.workspace, connection.name, { ...state, last_fetch: { at: now.toISOString(), count: plan.add.length + plan.change.length + plan.gone.length } });
+    // Jira answered, so whatever paused the connection is mended (Jira REQ23)
+    lift(host, [connection.name]);
     return { plan, done: null };
   }
 
@@ -730,6 +735,7 @@ export async function run(context: Context, write: boolean, options: PullOptions
 
   done.people = people.added.size;
   writeState(host.workspace, connection.name, { ...state, last_pull: now.toISOString(), last_fetch: { at: now.toISOString(), count: 0 } });
+  lift(host, [connection.name]);
   return { plan, done };
 }
 
@@ -982,8 +988,11 @@ function applyComments(
 
 const assetName = (attachment: JiraAttachment): string => `jira-${attachment.id}-${attachment.filename.replace(/[^\w.-]+/g, '-')}`;
 
+// The asset folder attachments go to (Jira Pull REQ14): the one attachments_folder names, when the Assets plugin manages it, else its first.
 function assetFolder(context: Context): string | null {
-  return context.assets?.folders()[0]?.name ?? null;
+  const folders = context.assets?.folders() ?? [];
+  const named = context.host.settings().get<string>('attachments_folder')?.trim();
+  return folders.find((folder) => folder.name === named)?.name ?? folders[0]?.name ?? null;
 }
 
 // Where an issue's embedded files point (REQ14): the attachment in Jira, or

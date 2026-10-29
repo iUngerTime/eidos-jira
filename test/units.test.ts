@@ -3,8 +3,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { adfToMarkdown } from '../src/adf.ts';
-import { siteBase } from '../src/client.ts';
-import { fromBoardUrl, opposed, readConnection, type Connection } from '../src/connections.ts';
+import { JiraError, siteBase } from '../src/client.ts';
+import { fromBoardUrl, opposed, readConnection, SignInError, type Connection } from '../src/connections.ts';
+import { refusalOf } from '../src/pause.ts';
 import type { Description } from '../src/describe.ts';
 import { checkMapping, compactFields, draftMapping, editorModel, fieldsFor, priorityFor, statusFor, typeFor } from '../src/mapping.ts';
 import { jqlMoment, moment } from '../src/pull.ts';
@@ -377,4 +378,20 @@ test('Jira Sync REQ19, REQ20: auto sync waits for a task’s saves to settle, sy
   await settle();
   assert.equal(events.filter(([event]) => event === 'needs').length, 1, 'a task still waiting for the same reason is not announced again');
   stop();
+});
+
+test('Jira REQ23: a refused sign-in pauses the site, a refused or missing board its connection, and anything else is tried again', () => {
+  assert.deepEqual(refusalOf(new JiraError('acme: GET /rest/api/3/myself answered 401: no', 401), true), { status: 401, site: true, reason: 'acme: GET /rest/api/3/myself answered 401: no' });
+  assert.equal(refusalOf(new SignInError('nobody is signed in'), false)?.site, true);
+  assert.equal(refusalOf(new JiraError('board answered 403', 403), true)?.site, false);
+  assert.equal(refusalOf(new JiraError('board answered 404', 404), true)?.status, 404);
+  // in a sync of one task a 403 or 404 is that issue's, a need rather than a pause
+  assert.equal(refusalOf(new JiraError('issue answered 404', 404), false), null);
+  assert.equal(refusalOf(new JiraError('answered 503', 503), true), null);
+  assert.equal(refusalOf(new Error('fetch failed'), true), null);
+});
+
+test('Jira REQ22: a connection keeps its title when it has one', () => {
+  assert.equal(readConnection({ name: 'ctv', title: 'CTV', site: 'acme.atlassian.net', project: 'CTV' })?.title, 'CTV');
+  assert.equal(readConnection({ name: 'ctv', site: 'acme.atlassian.net', project: 'CTV' })?.title, undefined);
 });

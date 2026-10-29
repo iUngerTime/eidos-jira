@@ -55,6 +55,8 @@ interface Pair {
 }
 interface ConnectionRow {
   name: string;
+  // the board's name as Jira gives it (Jira REQ22); a connection made before it was kept has none
+  title?: string;
   site: string;
   project: string;
   board?: number;
@@ -63,6 +65,24 @@ interface ConnectionRow {
   status: { last_pull: string | null; last_fetch: { at: string; count: number; error?: string } | null } | null;
   // the tasks edited here since their last pull or sync, and the creates and syncs cut short
   sync: { edited: Array<{ task: string; key: string; sides: string[] }>; pending: string[]; interrupted: Array<{ key: string; at: string }> } | null;
+  // set while auto fetch and auto sync are held off it, after Jira refused it (Jira REQ23)
+  paused: Pause | null;
+}
+interface Pause {
+  connection: string;
+  at: string;
+  status: number | null;
+  reason: string;
+}
+// a board the account signed in to a site can read (Jira REQ22)
+interface BoardRow {
+  site: string;
+  id: number;
+  name: string;
+  type: string;
+  project: string | null;
+  projectName: string | null;
+  connected: string | null;
 }
 // an account whose token this machine keeps
 interface HeldRow {
@@ -75,9 +95,10 @@ interface State {
   sign_ins: SignInRow[];
   held: HeldRow[];
   connections: ConnectionRow[];
-  settings: { pull_attachments: boolean; add_people: boolean; auto_fetch: string; auto_sync_on_save: boolean; auto_sync_on_push: boolean };
+  settings: { pull_attachments: boolean; attachments_folder: string; add_people: boolean; auto_fetch: string; auto_sync_on_save: boolean; auto_sync_on_push: boolean };
   // the tasks an auto sync stopped on, waiting for the person (Jira Sync REQ20)
   needs: Array<{ task: string; key: string; reason: string; at: string }>;
+  asset_folders: string[] | null;
 }
 interface EditorField {
   id: string;
@@ -322,6 +343,36 @@ function useJiraState(): { state: State | null; setState: (next: State) => void;
   return { state, setState, reload };
 }
 
+// A connection as a person knows it: the board's name as Jira gives it, else its project's key.
+const boardName = (connection: ConnectionRow): string => connection.title ?? connection.project;
+
+// What runs on its own is held off a connection Jira refused (Jira REQ23): why, what mends it, and Resume.
+function PausedNotice(props: { connection: ConnectionRow; pause: Pause; busy: string | null; act: Act; take: (answer: { state: State }) => void }): JSX.Element {
+  const host = usePluginHost();
+  const { t } = host;
+  const name = props.connection.name;
+  return (
+    <Notice tone="error" data-testid={`jira-paused-${name}`}>
+      <Stack gap="xs">
+        <Text size="sm" weight="strong" block>
+          {t('pausedTitle', { name: boardName(props.connection) })}
+        </Text>
+        <Text size="sm" block>
+          {t(props.pause.status === 403 || props.pause.status === 404 ? 'pausedAccess' : 'pausedSignIn', { site: props.connection.site })}
+        </Text>
+        <Text size="xs" tone="faint" block>
+          {props.pause.reason}
+        </Text>
+        <Row>
+          <Button size="sm" disabled={props.busy !== null} onClick={() => void props.act(`resume:${name}`, () => host.post<{ state: State }>('resume', { name }), props.take)}>
+            {t('resume')}
+          </Button>
+        </Row>
+      </Stack>
+    </Notice>
+  );
+}
+
 // ---- the sidebar ------------------------------------------------------------------------
 
 function JiraView(): JSX.Element {
@@ -415,13 +466,14 @@ function JiraView(): JSX.Element {
               <Stack gap="xs">
                 <Row>
                   <Text weight="strong" grow>
-                    {connection.name}
+                    {boardName(connection)}
                   </Text>
                   {waiting ? <Badge tone="accent">{waiting}</Badge> : null}
                 </Row>
                 <Text size="xs" tone="faint">
                   {[connection.project, connection.site].join(' · ')}
                 </Text>
+                {connection.paused && <PausedNotice connection={connection} pause={connection.paused} busy={busy} act={act} take={reload} />}
                 <Text size="sm" tone={lastFetch?.error ? 'error' : 'muted'} block>
                   {line}
                 </Text>
@@ -1363,10 +1415,69 @@ function Boards(props: { state: State; busy: string | null; act: Act; take: (ans
   const host = usePluginHost();
   const { t } = host;
   const [address, setAddress] = useState('');
-  const remove = async (name: string): Promise<void> => {
-    if (!(await host.dialog.confirm(t('removeAsk', { name }), { title: t('removeTitle'), ok: t('remove'), danger: true }))) return;
+  // the boards the accounts signed in here can read (Jira REQ22), read again when who is signed in changes
+  const [boards, setBoards] = useState<BoardRow[] | null>(null);
+  const [boardsError, setBoardsError] = useState<string | null>(null);
+  const [picked, setPicked] = useState('');
+  const signedIn = props.state.sign_ins.filter((row) => row.email !== null).map((row) => `${row.site}/${row.email}`).join(',');
+  const connectedKeys = props.state.connections.map((connection) => `${connection.site}/${connection.board ?? ''}`).join(',');
+  useEffect(() => {
+    if (!signedIn) return;
+    let live = true;
+    setBoardsError(null);
+    host.get<BoardRow[]>('boards').then(
+      (rows) => live && setBoards(rows),
+      (cause) => live && setBoardsError(reason(cause)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [host, signedIn, connectedKeys]);
+  const free = (boards ?? []).filter((board) => !board.connected);
+  const several = new Set((boards ?? []).map((board) => board.site)).size > 1;
+  const remove = async (name: string, shown: string): Promise<void> => {
+    if (!(await host.dialog.confirm(t('removeAsk', { name: shown }), { title: t('removeTitle'), ok: t('remove'), danger: true }))) return;
     await props.act(`remove:${name}`, () => host.post<{ state: State }>('disconnect', { name }), props.take);
   };
+  const connect = (body: Record<string, unknown>, done: () => void): void =>
+    void props.act(
+      'connect',
+      () => host.post<{ connection: { name: string }; state: State }>('connect', body),
+      (answer) => {
+        props.take(answer);
+        done();
+        props.onMap(answer.connection.name);
+      },
+    );
+  let picker: JSX.Element | null = null;
+  if (signedIn) {
+    if (boardsError) picker = <Text tone="error" size="sm">{t('boardsFailed', { error: boardsError })}</Text>;
+    else if (!boards) picker = <SkeletonBar width={260} />;
+    else if (free.length === 0) picker = <Text tone="muted" size="sm">{t(boards.length === 0 ? 'noReadableBoards' : 'allBoardsConnected')}</Text>;
+    else {
+      const chosen = free.find((board) => `${board.site}/${board.id}` === picked) ?? null;
+      picker = (
+        <Row>
+          <Select aria-label={t('chooseBoard')} value={picked} onChange={(event: { target: HTMLSelectElement }) => setPicked(event.target.value)} data-testid="jira-board-pick">
+            <option value="">{t('chooseBoardPlaceholder')}</option>
+            {free.map((board) => (
+              <option key={`${board.site}/${board.id}`} value={`${board.site}/${board.id}`}>
+                {[board.name, board.project, several ? board.site : null].filter(Boolean).join(' · ')}
+              </option>
+            ))}
+          </Select>
+          <Button
+            variant="primary"
+            disabled={props.busy === 'connect' || !chosen || !chosen.project}
+            onClick={() => chosen?.project && connect({ site: chosen.site, project: chosen.project, board: chosen.id, title: chosen.name }, () => setPicked(''))}
+            data-testid="jira-connect-picked"
+          >
+            {t('connect')}
+          </Button>
+        </Row>
+      );
+    }
+  }
   return (
     <Stack gap="xs">
       <SettingsHead>{t('boards')}</SettingsHead>
@@ -1377,14 +1488,14 @@ function Boards(props: { state: State; busy: string | null; act: Act; take: (ans
             <SettingRow
               key={connection.name}
               data-testid={`jira-connection-${connection.name}`}
-              label={connection.name}
+              label={boardName(connection)}
               hint={[connection.project, connection.site, connection.board ? t('board', { board: connection.board }) : null, mapped > 0 ? t('mappedCount', { n: mapped }) : t('notMapped')]
                 .filter(Boolean)
                 .join(' · ')}
               control={
                 <Row>
                   <Button onClick={() => props.onMap(connection.name)}>{t('editMapping')}</Button>
-                  <Button variant="quiet" disabled={props.busy !== null} onClick={() => void remove(connection.name)}>
+                  <Button variant="quiet" disabled={props.busy !== null} onClick={() => void remove(connection.name, boardName(connection))}>
                     {t('remove')}
                   </Button>
                 </Row>
@@ -1392,26 +1503,17 @@ function Boards(props: { state: State; busy: string | null; act: Act; take: (ans
             />
           );
         })}
+        {picker && <SettingRow stacked label={t('chooseBoard')} hint={t('chooseBoardHint')} control={picker} />}
         <SettingRow
           stacked
-          label={t('addBoard')}
+          label={t(picker ? 'pasteBoard' : 'addBoard')}
           hint={t('addBoardHint')}
           control={
             <Row>
               <Input placeholder={t('boardPlaceholder')} aria-label={t('boardAddress')} value={address} onChange={(event: { target: HTMLInputElement }) => setAddress(event.target.value)} />
               <Button
                 disabled={props.busy === 'connect' || !address.trim()}
-                onClick={() =>
-                  void props.act(
-                    'connect',
-                    () => host.post<{ connection: { name: string }; state: State }>('connect', { url: address }),
-                    (answer) => {
-                      props.take(answer);
-                      setAddress('');
-                      props.onMap(answer.connection.name);
-                    },
-                  )
-                }
+                onClick={() => connect({ url: address }, () => setAddress(''))}
                 data-testid="jira-connect"
               >
                 {t('connect')}
@@ -1420,10 +1522,13 @@ function Boards(props: { state: State; busy: string | null; act: Act; take: (ans
           }
         />
       </Card>
+      {props.state.connections.map((connection) =>
+        connection.paused ? <PausedNotice key={`paused-${connection.name}`} connection={connection} pause={connection.paused} busy={props.busy} act={props.act} take={props.take} /> : null,
+      )}
       {props.state.connections.flatMap((connection) =>
         connection.problems.map((problem) => (
           <Notice key={connection.name + problem.code + problem.message}>
-            {connection.name}: {problem.message}
+            {boardName(connection)}: {problem.message}
           </Notice>
         )),
       )}
@@ -1861,21 +1966,40 @@ function Options(props: { state: State; act: Act; take: (answer: { state: State 
   const { t } = host;
   const write = (name: string, value: unknown): void => void props.act(`setting:${name}`, () => host.put<{ state: State }>('settings', { [name]: value }), props.take);
   const settings = props.state.settings;
+  // where downloads land: the folder chosen while the Assets plugin manages it, else its first (Jira Pull REQ14)
+  const folders = props.state.asset_folders;
+  const chosenFolder = folders?.find((folder) => folder === settings.attachments_folder) ?? folders?.[0] ?? '';
   return (
     <Stack gap="xs">
       <SettingsHead>{t('options')}</SettingsHead>
       <Card variant="grouped">
         <SettingRow
           label={t('pullAttachments')}
-          hint={t('pullAttachmentsHint')}
+          hint={folders === null ? t('pullAttachmentsOff') : t('pullAttachmentsHint', { folder: `${chosenFolder}/` })}
           control={
             <Switch
               checked={settings.pull_attachments}
+              disabled={folders === null}
               aria-label={t('pullAttachments')}
               onChange={(event: { currentTarget: HTMLInputElement }) => write('pull_attachments', event.currentTarget.checked)}
             />
           }
         />
+        {settings.pull_attachments && folders !== null && folders.length > 1 && (
+          <SettingRow
+            label={t('attachmentsFolder')}
+            hint={t('attachmentsFolderHint')}
+            control={
+              <Select aria-label={t('attachmentsFolder')} value={chosenFolder} onChange={(event: { target: HTMLSelectElement }) => write('attachments_folder', event.target.value)} data-testid="jira-attachments-folder">
+                {folders.map((folder) => (
+                  <option key={folder} value={folder}>
+                    {folder}/
+                  </option>
+                ))}
+              </Select>
+            }
+          />
+        )}
         <SettingRow
           label={t('addPeople')}
           hint={t('addPeopleHint')}
@@ -1940,13 +2064,18 @@ export const page: PagePlugin = {
   ],
   pages: [{ path: 'mapping', render: (route: { segments: string[] }) => <MappingPage key={route.segments[0] ?? ''} name={decodeURIComponent(route.segments[0] ?? '')} /> }],
   settings: () => <JiraSettings />,
-  settingsDrawn: ['connections', 'accounts', 'pull_attachments', 'add_people', 'auto_fetch', 'auto_sync_on_save', 'auto_sync_on_push'],
+  settingsDrawn: ['connections', 'accounts', 'pull_attachments', 'attachments_folder', 'add_people', 'auto_fetch', 'auto_sync_on_save', 'auto_sync_on_push'],
   // wherever the person is, an auto sync that stops on something says so once (Jira Sync REQ20)
   useListen: () => {
     const host = usePluginHost();
     usePluginEvent('needs', (payload) => {
       const need = payload as { key?: string; reason?: string };
       host.toast(host.t('needsTitle', { key: need.key ?? '' }), 'info', need.reason ?? '');
+    });
+    // named once, as it pauses (Jira REQ23)
+    usePluginEvent('paused', (payload) => {
+      const paused = payload as { connection?: string; title?: string; reason?: string };
+      host.toast(host.t('pausedToast', { name: paused.title ?? paused.connection ?? '' }), 'error', paused.reason ?? '');
     });
   },
 };

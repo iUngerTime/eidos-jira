@@ -254,6 +254,12 @@ export async function startFakeJira(state: FakeState = seed()): Promise<{ url: s
       return send(401, { errorMessages: ['Client must be authenticated to access this resource.'] });
     const path = url.pathname;
     if (path === '/rest/api/3/myself') return send(200, { accountId: '557058:tester', displayName: 'Tester', emailAddress: EMAIL, timeZone: 'UTC' });
+    // the boards the account can read, in two pages, as Jira pages them (Jira REQ22)
+    if (path === '/rest/agile/1.0/board')
+      return Number(url.searchParams.get('startAt') ?? 0) === 0
+        ? send(200, { values: [{ id: 1, name: 'ACME board', type: 'scrum', location: { projectKey: 'ACME', projectName: 'Acme' } }], isLast: false })
+        : send(200, { values: [{ id: 2, name: 'Ops Kanban', type: 'kanban', location: { projectKey: 'OPS', projectName: 'Operations' } }], isLast: true });
+    if (path === '/rest/agile/1.0/board/1') return send(200, { id: 1, name: 'ACME board', type: 'scrum' });
     if (path === '/rest/agile/1.0/board/1/configuration')
       return send(200, {
         filter: { id: '10000' },

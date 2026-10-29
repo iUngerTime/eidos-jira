@@ -117,6 +117,36 @@ test('Jira REQ2, REQ3: a connection is written to the shared settings; another o
   assert.match(await ok(['jira', 'whoami']), /tester@example.com, kept for this root/);
 });
 
+test('Jira REQ22: boards lists every board the account can read, across pages, marking the one connected; a connection keeps the board name Jira gives', async () => {
+  const rows = JSON.parse(await ok(['jira', 'boards', '--json'])) as Array<{ id: number; name: string; project: string; connected: string | null }>;
+  assert.deepEqual(
+    rows.map((row) => [row.id, row.name, row.project, row.connected]),
+    [
+      [1, 'ACME board', 'ACME', 'acme'],
+      [2, 'Ops Kanban', 'OPS', null],
+    ],
+  );
+  assert.match(readFileSync(path.join(root, '.eidos', 'plugins', 'jira', 'settings.yaml'), 'utf8'), /title: ACME board/);
+  assert.match(await ok(['jira', 'boards']), /Ops Kanban \(kanban, OPS\)/);
+});
+
+test('Jira REQ23: a paused connection says so in status until resume lifts it, and a fetch asked for by hand that succeeds lifts it too', async () => {
+  const stateFile = path.join(root, '.eidos', 'plugins', 'jira', 'local', 'state-acme.json');
+  const pause = (): void => {
+    const held = existsSync(stateFile) ? (JSON.parse(readFileSync(stateFile, 'utf8')) as Record<string, unknown>) : {};
+    writeFileSync(stateFile, JSON.stringify({ ...held, paused: { at: '2026-10-29T10:00:00.000Z', status: 401, reason: 'acme: GET /rest/api/3/myself answered 401' } }));
+  };
+  mkdirSync(path.dirname(stateFile), { recursive: true });
+  pause();
+  assert.match(await ok(['jira', 'status']), /acme: paused since 2026-10-29T10:00:00.000Z, .*eidos jira resume acme/);
+  assert.match(await ok(['jira', 'resume', 'acme']), /Resumed acme/);
+  assert.doesNotMatch(await ok(['jira', 'status']), /paused/);
+  assert.match(await ok(['jira', 'resume', 'acme']), /acme was not paused/);
+  pause();
+  await ok(['jira', 'fetch', 'acme']);
+  assert.equal((JSON.parse(readFileSync(stateFile, 'utf8')) as { paused?: unknown }).paused, undefined);
+});
+
 test('Jira REQ6, REQ12: describe reads the board and keeps it in local/; map drafts by names and categories and writes only what is accepted', async () => {
   const described = JSON.parse(await ok(['jira', 'describe', 'acme', '--json'])) as { columns: Array<{ name: string; statuses: string[] }>; types: Array<{ name: string }>; sprint_field: string };
   assert.deepEqual(described.columns.at(-1), { name: 'Client Review', statuses: ['Client Review'] }, "a column's status the project's list leaves out is named, not left as its id");
@@ -260,8 +290,11 @@ test('Jira Pull REQ11: an issue gone from the scope leaves its task, marked gone
   assert.doesNotMatch(readFileSync(taskFile('t-acme-3-'), 'utf8'), /gone:/);
 });
 
-test('Jira Pull REQ14: with pull_attachments on, an attachment is downloaded into assets once and the reference points at it', async () => {
+test('Jira Pull REQ14: with pull_attachments on, an attachment is downloaded once into the asset folder attachments_folder names, and the reference points at it', async () => {
   await ok(['plugin', 'set', 'jira', 'pull_attachments', 'true']);
+  // a folder of Jira's own beside assets/, managed by the Assets plugin
+  await ok(['configure:folder', 'add', 'jira-files', '--owned-by', '@assets/files', '--yes']);
+  await ok(['plugin', 'set', 'jira', 'attachments_folder', 'jira-files']);
   touch(fake.state, 'ACME-2', {}, jiraNow());
   const fetched = await ok(['jira', 'fetch']);
   assert.match(fetched, /1 attachment to download/);
@@ -270,7 +303,8 @@ test('Jira Pull REQ14: with pull_attachments on, an attachment is downloaded int
   assert.match(pulled, /1 attachments downloaded/);
   assert.match(pulled, /1 changed/, 'a reference pointed at the file counts as a change');
   const story = readFileSync(taskFile('t-acme-2-ship'), 'utf8');
-  assert.match(story, /!\[mockup\.png\]\(\.\.\/assets\/jira-20001-mockup\.png\)/, 'an image in the root is drawn as one');
+  assert.match(story, /!\[mockup\.png\]\(\.\.\/jira-files\/jira-20001-mockup\.png\)/, 'an image in the root is drawn as one');
+  assert.ok(existsSync(path.join(root, 'jira-files', 'jira-20001-mockup.png')), 'in the folder attachments_folder names');
   touch(fake.state, 'ACME-2', {}, jiraNow());
   assert.doesNotMatch(await ok(['jira', 'pull']), /attachments downloaded/, 'not downloaded again');
   // a comment or a description with a mention and a file reads as the pull writes it, so nothing is counted to change

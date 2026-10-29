@@ -44,6 +44,8 @@ export type MappingPart = (typeof MAPPING_PARTS)[number];
 
 export interface Connection {
   name: string;
+  // the board's name as Jira gives it, or the project's for a connection with no board (Jira REQ22)
+  title?: string;
   site: string;
   project: string;
   board?: number;
@@ -54,6 +56,8 @@ export interface Connection {
 }
 
 export class ConnectionError extends Error {}
+// Nobody signed in to a site, or their token gone: what only the person can mend, as a sign-in Jira refuses is (Jira REQ23).
+export class SignInError extends ConnectionError {}
 
 const plain = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() !== '' ? value.trim() : typeof value === 'number' ? String(value) : undefined);
@@ -107,8 +111,10 @@ export function readConnection(value: unknown): Connection | null {
   }
   const board = Number(value['board']);
   const jql = text(value['jql']);
+  const title = text(value['title']);
   return {
     name,
+    ...(title ? { title } : {}),
     site,
     project: project.toUpperCase(),
     ...(Number.isInteger(board) && board > 0 ? { board } : {}),
@@ -220,10 +226,10 @@ export function signIn(host: Host, site: string, env: NodeJS.ProcessEnv = proces
 
 export function credentials(host: Host, site: string, env: NodeJS.ProcessEnv = process.env): Credentials {
   const found = signIn(host, site, env);
-  if (!found) throw new ConnectionError(`nobody is signed in to ${siteKey(site)} here; eidos jira login ${siteKey(site)}`);
+  if (!found) throw new SignInError(`nobody is signed in to ${siteKey(site)} here; eidos jira login ${siteKey(site)}`);
   if (found.scope === 'environment') return { email: found.email, token: env['JIRA_API_TOKEN']!.trim() };
   const token = tokenStore().get(secretKey(site, found.email));
-  if (!token) throw new ConnectionError(`the token for ${found.email} on ${siteKey(site)} is not in ${tokenStore().where}; eidos jira login ${siteKey(site)}`);
+  if (!token) throw new SignInError(`the token for ${found.email} on ${siteKey(site)} is not in ${tokenStore().where}; eidos jira login ${siteKey(site)}`);
   return { email: found.email, token };
 }
 

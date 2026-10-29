@@ -34,6 +34,7 @@ import { heldOf, readState, run, skipOf, writeState, type Done, type Plan } from
 import { readNeeds, setNeed, startAutoSync, type Need } from './autosync.ts';
 import { apply as applySync, editedHere, journalOf, prepare as prepareSync, sendComment, SyncRefused, taskFor, type SyncDone, type SyncOptions, type SyncPlan } from './sync.ts';
 import { tokensFile } from './tokens.ts';
+import { lift, onSite, pause, pauseOf, pauses, refusalOf, type Pause } from './pause.ts';
 import type { AssetsApi, BacklogApi, CommentsApi, TaskView } from './types.ts';
 
 export interface JiraApi {
@@ -50,7 +51,14 @@ export interface JiraApi {
   // every account kept on this machine, and which one is the default and which one this root picked
   heldSignIns(): Array<{ site: string; email: string; default: boolean; picked: boolean }>;
   use(site: string, email: string, global: boolean): Promise<void>;
-  connect(input: { name: string; site: string; project: string; board?: string | number; jql?: string; direction?: 'pull' | 'push'; restricted_comments?: boolean }): Promise<Connection>;
+  // every board the account can read on a site, every site signed in here when none is named (Jira REQ22)
+  boards(site?: string): Promise<BoardRow[]>;
+  // the connections what runs on its own is held off, and the person lifting a pause (Jira REQ23)
+  pauses(): Pause[];
+  // the folders the Assets plugin manages, null with it off (Jira Pull REQ14)
+  assetFolders(): string[] | null;
+  resume(name: string): boolean;
+  connect(input: { name: string; title?: string; site: string; project: string; board?: string | number; jql?: string; direction?: 'pull' | 'push'; restricted_comments?: boolean }): Promise<Connection>;
   disconnect(name: string): Promise<void>;
   describe(name: string, refresh: boolean): Promise<Description>;
   draft(name: string): Promise<{ entries: DraftEntry[]; unmatched: string[] }>;
@@ -99,9 +107,24 @@ export interface TaskLink {
 
 export interface SyncStatus {
   connection: string;
+  // the board's name as Jira gives it, else the connection's (Jira REQ22)
+  title: string;
+  // set while what runs on its own is held off the connection (Jira REQ23)
+  paused: Pause | null;
   edited: Array<{ task: string; key: string; sides: string[] }>;
   pending: string[];
   interrupted: Array<{ key: string; at: string }>;
+}
+
+// A board the account signed in to a site can read (Jira REQ22), and the connection here over it, if any.
+export interface BoardRow {
+  site: string;
+  id: number;
+  name: string;
+  type: string;
+  project: string | null;
+  projectName: string | null;
+  connected: string | null;
 }
 
 export interface SignInRow {
@@ -340,14 +363,60 @@ const entry: CliEntry = {
           throw error;
         });
         await saveSignIn(host, site, { email: email.trim(), token: token.trim() }, global);
+        // a sign-in made again is the person acting on a refused one
+        lift(host, onSite(host, site));
         return { site: siteKey(site), email: email.trim(), name: me.displayName ?? email.trim() };
       },
       logout: (site, email) => removeSignIn(host, site, email),
       heldSignIns: () => heldSignIns(host),
       use: (site, email, global) => useSignIn(host, site, email.trim(), global),
+      boards: async (site) => {
+        const sites = site ? [siteKey(site)] : signedInSites(host);
+        const held = connections(host);
+        const out: BoardRow[] = [];
+        for (const each of sites) {
+          const client = jiraClient(each, credentials(host, each), siteKey(each));
+          for (let startAt = 0; ; ) {
+            const page = await client.get<{ values?: Array<{ id: number; name: string; type?: string; location?: { projectKey?: string; projectName?: string } }>; isLast?: boolean }>(
+              '/rest/agile/1.0/board',
+              { startAt, maxResults: 50 },
+            );
+            const values = page.values ?? [];
+            for (const board of values) {
+              const connected = held.find((entry) => siteKey(entry.site) === siteKey(each) && entry.board === board.id);
+              out.push({
+                site: siteKey(each),
+                id: board.id,
+                name: board.name,
+                type: board.type ?? 'scrum',
+                project: board.location?.projectKey ?? null,
+                projectName: board.location?.projectName ?? null,
+                connected: connected?.name ?? null,
+              });
+            }
+            if (page.isLast !== false || values.length === 0) break;
+            startAt += values.length;
+          }
+        }
+        return out.sort((a, b) => a.site.localeCompare(b.site) || a.name.localeCompare(b.name));
+      },
+      pauses: () => pauses(host),
+      assetFolders: () => host.plugin<AssetsApi>('assets')?.folders().map((folder) => folder.name) ?? null,
+      resume: (name) => lift(host, [connectionNamed(host, name).name]),
       connect: async (input) => {
         const made = readConnection({ ...input, direction: input.direction ?? 'pull', mapping: {} });
         if (!made) throw new Error('a connection needs a name, a site, and a project');
+        // the board's own name, or the project's, as Jira gives it; a connection made without it is named by its project key
+        if (!made.title) {
+          try {
+            const client = jiraClient(made.site, credentials(host, made.site), made.name);
+            made.title = made.board
+              ? (await client.get<{ name: string }>(`/rest/agile/1.0/board/${made.board}`)).name
+              : (await client.get<{ name: string }>(`/rest/api/3/project/${encodeURIComponent(made.project)}`)).name;
+          } catch {
+            made.title = made.project;
+          }
+        }
         const all = connections(host);
         if (all.some((held) => held.name.toLowerCase() === made.name.toLowerCase())) throw new Error(`a connection called ${made.name} is already here`);
         await writeConnections(host, [...all, made]);
@@ -492,8 +561,9 @@ const entry: CliEntry = {
         const task = taskFor(backlogOf(host), ref);
         const context = await contextFor(host, connectionOfTask(host, task));
         const done = await applySync(context, await prepareSync(context, task, options));
-        // a task synced needs nobody any more
+        // a task synced needs nobody any more, and its connection answered
         setNeed(host.workspace, done.task, null);
+        lift(host, [context.connection.name]);
         // the page's two views, the boards and the open ticket, read their state again
         host.emit('changed', { task: done.task });
         return done;
@@ -521,7 +591,14 @@ const entry: CliEntry = {
             const journal = journalOf(host.workspace, heldOf(task)!.id);
             return journal ? [{ key: journal.key, at: journal.at }] : [];
           });
-          return { connection: connection.name, edited: editedHere({ backlog, connection }), pending, interrupted };
+          return {
+            connection: connection.name,
+            title: connection.title ?? connection.name,
+            paused: pauseOf(host, connection.name),
+            edited: editedHere({ backlog, connection }),
+            pending,
+            interrupted,
+          };
         });
       },
       needs: () => readNeeds(host.workspace),
@@ -663,26 +740,56 @@ const entry: CliEntry = {
         .requiredOption('--site <site>', 'the Jira site, <name>.atlassian.net')
         // `--project` is the host's, the project folder every command takes, so the Jira project goes by its key
         .requiredOption('--key <key>', "the Jira project's key (ACME)")
-        .option('--board <id>', 'a board whose filter sets the scope')
+        .option('--board <id>', 'a board whose filter sets the scope (eidos jira boards lists them)')
+        .option('--title <title>', "the name the connection is shown by; the board's own, or the project's, when none is given")
         .option('--jql <jql>', 'JQL that narrows the scope further')
         .option('--direction <direction>', 'pull (Jira to Eidos); push is not built yet', 'pull')
         .option('--restricted-comments', 'pull comments Jira restricts to a role or a group too')
         .description('add a connection to this root, shared with everyone in it')
         .action(
-          action(async (name: string, options: { site: string; key: string; board?: string; jql?: string; direction: string; restrictedComments?: boolean }) => {
+          action(async (name: string, options: { site: string; key: string; board?: string; title?: string; jql?: string; direction: string; restrictedComments?: boolean }) => {
             if (options.direction !== 'pull' && options.direction !== 'push') throw new Error('a direction is pull or push');
             const made = await api.connect({
               direction: options.direction,
               name,
               site: options.site,
               project: options.key,
+              ...(options.title ? { title: options.title } : {}),
               ...(options.board ? { board: options.board } : {}),
               ...(options.jql ? { jql: options.jql } : {}),
               restricted_comments: options.restrictedComments === true,
             });
             print(
-              `Added ${made.name}: ${made.direction} ${made.project} on ${siteKey(made.site)}${made.board ? `, board ${made.board}` : ''}. Next: eidos jira describe ${made.name}, then eidos jira map ${made.name}.`,
+              `Added ${made.name} (${made.title ?? made.project}): ${made.direction} ${made.project} on ${siteKey(made.site)}${made.board ? `, board ${made.board}` : ''}. Next: eidos jira describe ${made.name}, then eidos jira map ${made.name}.`,
             );
+          }),
+        );
+
+      command
+        .command('boards')
+        .argument('[site]', 'one site; every site signed in here when none is named')
+        .option('--json', 'print as JSON')
+        .description('the boards your account can read, each with its id and project, to connect one by')
+        .action(
+          action(async (site: string | undefined, options: { json?: boolean }) => {
+            const rows = await api.boards(site);
+            if (options.json) return json(rows);
+            if (rows.length === 0) return print(site ? `No board on ${siteKey(site)} is readable by your account.` : 'No board is readable by an account signed in here; eidos jira login <site> first.');
+            for (const row of rows)
+              print(
+                `${row.site}  ${String(row.id).padStart(5)}  ${row.name} (${row.type}${row.project ? `, ${row.project}` : ''})${row.connected ? `  connected as ${row.connected}` : ''}`,
+              );
+          }),
+        );
+
+      command
+        .command('resume')
+        .argument('<connection>', "the connection's name")
+        .description('let auto fetch and auto sync reach a connection again after Jira refused it, once access is mended')
+        .action(
+          action((name: string) => {
+            const found = connectionNamed(host, name);
+            print(api.resume(found.name) ? `Resumed ${found.name}: auto fetch and auto sync reach it again.` : `${found.name} was not paused.`);
           }),
         );
 
@@ -837,6 +944,7 @@ const entry: CliEntry = {
             const rows = api.syncStatus(name);
             if (options.json) return json(rows);
             for (const row of rows) {
+              if (row.paused) print(`${row.connection}: paused since ${row.paused.at}, ${row.paused.reason}; mend access, then eidos jira resume ${row.connection}`);
               print(`${row.connection}: ${row.edited.length === 0 ? 'nothing edited here since the last pull or sync' : `${row.edited.length} task${row.edited.length === 1 ? '' : 's'} edited here`}`);
               for (const edited of row.edited) print(`  ~ ${edited.key}  ${edited.task}: ${edited.sides.join(', ')}`);
               for (const task of row.pending) print(`  … ${task}: a create was cut short; eidos jira create ${task} --connection ${row.connection} finds its issue`);
@@ -1073,10 +1181,17 @@ const entry: CliEntry = {
       if (Number.isFinite(minutes) && minutes > 0) {
         const tick = async (): Promise<void> => {
           for (const connection of connections(host).filter((entry) => entry.direction === 'pull')) {
+            // a connection Jira refused is not asked again until the person acts (Jira REQ23)
+            if (pauseOf(host, connection.name)) continue;
             try {
               const plan = await fetchOne(connection);
               host.emit('fetched', { connection: connection.name, count: plan.add.length + plan.change.length + plan.gone.length });
             } catch (error) {
+              const refusal = refusalOf(error, true);
+              if (refusal) {
+                pause(host, connection, refusal);
+                continue;
+              }
               const state = readState(host.workspace, connection.name);
               writeState(host.workspace, connection.name, {
                 ...state,

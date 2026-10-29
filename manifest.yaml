@@ -17,7 +17,12 @@ settings:
     type: checkbox
     scope: root
     default: false
-    meaning: download each pulled issue's attachments into assets/ instead of linking to them in Jira
+    meaning: download each pulled issue's attachments into an asset folder the Assets plugin manages instead of linking to them in Jira
+  - name: attachments_folder
+    type: text
+    scope: root
+    default: ''
+    meaning: the asset folder downloaded attachments go to, one the Assets plugin manages; empty, its first folder
   - name: add_people
     type: checkbox
     scope: root

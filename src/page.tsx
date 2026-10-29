@@ -75,7 +75,9 @@ interface State {
   sign_ins: SignInRow[];
   held: HeldRow[];
   connections: ConnectionRow[];
-  settings: { pull_attachments: boolean; add_people: boolean; auto_fetch: string };
+  settings: { pull_attachments: boolean; add_people: boolean; auto_fetch: string; auto_sync_on_save: boolean; auto_sync_on_push: boolean };
+  // the tasks an auto sync stopped on, waiting for the person (Jira Sync REQ20)
+  needs: Array<{ task: string; key: string; reason: string; at: string }>;
 }
 interface EditorField {
   id: string;
@@ -374,6 +376,33 @@ function JiraView(): JSX.Element {
   else
     body = (
       <Stack gap="md" pad="sm">
+        {state.needs.length > 0 && (
+          <Card data-testid="jira-needs">
+            <Stack gap="xs">
+              <Row>
+                <Text weight="strong" grow>
+                  {t('needsYou')}
+                </Text>
+                <Badge tone="accent">{state.needs.length}</Badge>
+              </Row>
+              {state.needs.map((need) => (
+                <Stack key={need.task} gap="xs">
+                  <Row>
+                    <Text size="sm" grow>
+                      {need.key}
+                    </Text>
+                    <Button size="sm" variant="quiet" disabled={busy !== null} onClick={() => setReviewing(need.task)}>
+                      {t('review')}
+                    </Button>
+                  </Row>
+                  <Text size="xs" tone="faint" block>
+                    {need.reason}
+                  </Text>
+                </Stack>
+              ))}
+            </Stack>
+          </Card>
+        )}
         {state.connections.map((connection) => {
           const lastFetch = connection.status?.last_fetch;
           const waiting = found[connection.name] ?? (lastFetch && !lastFetch.error ? lastFetch.count : null);
@@ -1865,6 +1894,30 @@ function Options(props: { state: State; act: Act; take: (answer: { state: State 
             </Select>
           }
         />
+        <SettingRow
+          label={t('autoSyncSave')}
+          hint={t('autoSyncSaveHint')}
+          control={
+            <Switch
+              checked={settings.auto_sync_on_save}
+              aria-label={t('autoSyncSave')}
+              data-testid="jira-auto-sync-save"
+              onChange={(event: { currentTarget: HTMLInputElement }) => write('auto_sync_on_save', event.currentTarget.checked)}
+            />
+          }
+        />
+        <SettingRow
+          label={t('autoSyncPush')}
+          hint={t('autoSyncPushHint')}
+          control={
+            <Switch
+              checked={settings.auto_sync_on_push}
+              aria-label={t('autoSyncPush')}
+              data-testid="jira-auto-sync-push"
+              onChange={(event: { currentTarget: HTMLInputElement }) => write('auto_sync_on_push', event.currentTarget.checked)}
+            />
+          }
+        />
       </Card>
     </Stack>
   );
@@ -1887,5 +1940,13 @@ export const page: PagePlugin = {
   ],
   pages: [{ path: 'mapping', render: (route: { segments: string[] }) => <MappingPage key={route.segments[0] ?? ''} name={decodeURIComponent(route.segments[0] ?? '')} /> }],
   settings: () => <JiraSettings />,
-  settingsDrawn: ['connections', 'accounts', 'pull_attachments', 'add_people', 'auto_fetch'],
+  settingsDrawn: ['connections', 'accounts', 'pull_attachments', 'add_people', 'auto_fetch', 'auto_sync_on_save', 'auto_sync_on_push'],
+  // wherever the person is, an auto sync that stops on something says so once (Jira Sync REQ20)
+  useListen: () => {
+    const host = usePluginHost();
+    usePluginEvent('needs', (payload) => {
+      const need = payload as { key?: string; reason?: string };
+      host.toast(host.t('needsTitle', { key: need.key ?? '' }), 'info', need.reason ?? '');
+    });
+  },
 };

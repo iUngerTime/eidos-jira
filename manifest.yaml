@@ -34,3 +34,13 @@ settings:
     default: 'off'
     options: ['off', '5', '15', '30', '60']
     meaning: fetch every pull connection this many minutes apart while the app has the root open; nothing pulls on its own
+  - name: auto_sync_on_save
+    type: checkbox
+    scope: me
+    default: false
+    meaning: sync a task that holds an issue a few seconds after its last save, while the app has the root open; anything to settle waits in Needs you
+  - name: auto_sync_on_push
+    type: checkbox
+    scope: me
+    default: false
+    meaning: sync every task edited here once the app pushes (an auto save's publish, Publish); anything to settle waits in Needs you

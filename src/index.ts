@@ -31,6 +31,7 @@ import { checkMapping, compactFields, defaultFields, draftMapping, editorModel, 
 import { ask, confirm, readLines } from './prompt.ts';
 import { create as createIssue, parentsFirst, prepareCreate, type CreateOptions, type CreatePlan, type Created } from './create.ts';
 import { heldOf, readState, run, skipOf, writeState, type Done, type Plan } from './pull.ts';
+import { readNeeds, setNeed, startAutoSync, type Need } from './autosync.ts';
 import { apply as applySync, editedHere, journalOf, prepare as prepareSync, sendComment, SyncRefused, taskFor, type SyncDone, type SyncOptions, type SyncPlan } from './sync.ts';
 import { tokensFile } from './tokens.ts';
 import type { AssetsApi, BacklogApi, CommentsApi, TaskView } from './types.ts';
@@ -77,6 +78,8 @@ export interface JiraApi {
   // Jira Push: what creating an issue from each task would send, and creating them once none is stopped
   createPlan(tasks: string[], connection: string, options?: CreateOptions): Promise<CreatePlan[]>;
   create(tasks: string[], connection: string, options?: CreateOptions): Promise<Created[]>;
+  // the tasks an auto sync stopped on, waiting for the person (Jira Sync REQ20)
+  needs(): Need[];
   // the task a file of the root holds, as the page shows it: the issue it is linked to, the create it waits on, or neither
   taskAt(file: string): TaskLink | null;
   // marks a task Don't sync, or clears the mark: a marked task is the root's own, never pulled over nor sent
@@ -489,6 +492,8 @@ const entry: CliEntry = {
         const task = taskFor(backlogOf(host), ref);
         const context = await contextFor(host, connectionOfTask(host, task));
         const done = await applySync(context, await prepareSync(context, task, options));
+        // a task synced needs nobody any more
+        setNeed(host.workspace, done.task, null);
         // the page's two views, the boards and the open ticket, read their state again
         host.emit('changed', { task: done.task });
         return done;
@@ -519,6 +524,7 @@ const entry: CliEntry = {
           return { connection: connection.name, edited: editedHere({ backlog, connection }), pending, interrupted };
         });
       },
+      needs: () => readNeeds(host.workspace),
       taskAt: (file) => {
         const wanted = file.replace(/\\/g, '/').toLowerCase();
         const task = backlogOf(host)
@@ -1083,11 +1089,14 @@ const entry: CliEntry = {
         timers.push(setInterval(() => void tick(), minutes * 60_000));
       }
     }
+    // auto sync (Jira Sync REQ19, REQ20): after a save and after a push, each off until the person turns it on
+    const stopAutoSync = host.serving ? startAutoSync(host, api) : null;
 
     return {
       api,
       dispose: () => {
         for (const timer of timers) clearTimeout(timer);
+        stopAutoSync?.();
       },
     };
   },

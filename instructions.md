@@ -5,7 +5,7 @@ Jira is a plugin from outside the package (`@iungertime/jira`) that connects a r
 ### Files
 
 - `.eidos/plugins/jira/settings.yaml`: `connections` (shared), each `{ name, site, project, board?, jql?, direction, restricted_comments?, mapping }`, and `pull_attachments`.
-- `.eidos/plugins/jira/local.yaml`: `accounts`, the email each site signs in with for this root; `auto_fetch`. Never committed.
+- `.eidos/plugins/jira/local.yaml`: `accounts`, the email each site signs in with for this root; `auto_fetch`; `auto_sync_on_save` and `auto_sync_on_push`, each person's auto sync (off by default), which runs only where the app is open and leaves anything to settle in `local/needs.json` (the sidebar's Needs you). Never committed.
 - `.eidos/plugins/jira/local/`: what `describe` read per connection, and the last pull's time. Never committed.
 - A pulled or created task holds its issue in its frontmatter, `jira: { site, id, key, updated, comments, parent?, digest, remote, connection?, gone? }` (`digest`: what the task held at the last pull or sync, per field; `remote`: Jira's own value then), written by the plugin alone; never edit it. A create cut short leaves `jira: { site, connection, pending, since }` until the next create of that task finds its issue.
 - `.eidos/plugins/jira/local/sync/<issue id>.json`: a sync cut short; `eidos jira status` names it, the next sync of that issue finishes it.

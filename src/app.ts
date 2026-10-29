@@ -36,7 +36,7 @@ function createOptions(value: unknown): CreateOptions {
   };
 }
 
-const SETTINGS = ['pull_attachments', 'add_people', 'auto_fetch'] as const;
+const SETTINGS = ['pull_attachments', 'add_people', 'auto_fetch', 'auto_sync_on_save', 'auto_sync_on_push'] as const;
 
 // The options a sync is run with, as the page's review sends them: only what it can choose, each checked here.
 function syncOptions(value: unknown): SyncOptions {
@@ -74,6 +74,7 @@ function state(host: AppHost, api: JiraApi): Record<string, unknown> {
       sync: waiting.find((entry) => entry.connection === connection.name) ?? null,
     })),
     settings: Object.fromEntries(SETTINGS.map((name) => [name, host.settings().get(name)])),
+    needs: api.needs(),
   };
 }
 

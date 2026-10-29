@@ -299,3 +299,82 @@ test('Jira Sync REQ18: two texts split into the lines both hold and the conflict
     'a\nc',
   );
 });
+
+test('Jira Sync REQ19, REQ20: auto sync waits for a task’s saves to settle, syncs what was edited here once a push is heard, and puts what it stops on in Needs you', async (t) => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { readNeeds, startAutoSync } = await import('../src/autosync.ts');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const settings: Record<string, boolean> = { auto_sync_on_save: false, auto_sync_on_push: false };
+  let saved: (paths: string[]) => void = () => undefined;
+  let pushed: (target: string | null) => void = () => undefined;
+  const events: Array<[string, unknown]> = [];
+  const host = {
+    workspace: mkdtempSync(path.join(tmpdir(), 'jira-auto-')),
+    settings: () => ({ get: (name: string) => settings[name] }),
+    files: { on: (_event: string, listener: (paths: string[]) => void) => void (saved = listener) },
+    emit: (event: string, payload: unknown) => void events.push([event, payload]),
+    plugin: () => ({ onPush: (listener: (target: string | null) => void) => ((pushed = listener), () => undefined) }),
+  };
+  const synced: string[] = [];
+  const refuse = new Set<string>(['T-2']);
+  const api = {
+    syncStatus: () => [
+      {
+        connection: 'acme',
+        edited: [
+          { task: 'T-1', key: 'ACME-1', sides: ['title'] },
+          { task: 'T-2', key: 'ACME-2', sides: ['status'] },
+        ],
+        pending: [],
+        interrupted: [],
+      },
+    ],
+    taskAt: (file: string) =>
+      file === 'backlog/t-1.md'
+        ? { task: 'T-1', title: 'One', key: 'ACME-1', url: null, connection: 'acme', pending: false, skipped: false }
+        : file === 'backlog/t-3.md'
+          ? { task: 'T-3', title: 'Three', key: 'ACME-3', url: null, connection: 'acme', pending: false, skipped: true }
+          : null,
+    syncPlan: async (task: string) => ({ blockers: refuse.has(task) ? [{ side: 'section:acceptance-criteria', code: 'conflict', message: 'raw', fix: '' }] : [] }),
+    sync: async (task: string) => {
+      synced.push(task);
+      return {};
+    },
+  };
+  const stop = startAutoSync(host as never, api as never);
+  const settle = async (): Promise<void> => {
+    t.mock.timers.tick(5_000);
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  saved(['backlog/t-1.md']);
+  await settle();
+  assert.deepEqual(synced, [], 'off by default: a save syncs nothing');
+
+  settings['auto_sync_on_save'] = true;
+  saved(['backlog/t-1.md']);
+  t.mock.timers.tick(3_000);
+  saved(['backlog/t-1.md', 'backlog/t-3.md']);
+  await settle();
+  assert.deepEqual(synced, ['T-1'], 'a run of saves is one sync, and a task marked Don’t sync is left alone');
+
+  synced.length = 0;
+  pushed('origin/main');
+  await settle();
+  assert.deepEqual(synced, [], 'a push syncs nothing while that switch is off');
+  settings['auto_sync_on_push'] = true;
+  pushed('origin/main');
+  await settle();
+  assert.deepEqual(synced, ['T-1'], 'a push syncs every task edited here, one at a time, and writes nothing for one with anything to settle');
+  assert.deepEqual(
+    readNeeds(host.workspace).map((need) => [need.task, need.key, need.reason]),
+    [['T-2', 'ACME-2', 'Acceptance criteria: changed in Jira and here']],
+  );
+  assert.equal(events.filter(([event]) => event === 'needs').length, 1);
+  pushed('origin/main');
+  await settle();
+  assert.equal(events.filter(([event]) => event === 'needs').length, 1, 'a task still waiting for the same reason is not announced again');
+  stop();
+});

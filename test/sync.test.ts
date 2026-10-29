@@ -411,3 +411,24 @@ test('Jira REQ21, Jira Sync REQ17: sections bundled into the description go as o
   assert.doesNotMatch(settings, /acceptance-criteria/);
   assert.match(settings, /jira: description\n\s+eidos: section:description/, 'the description keeps its own section');
 });
+
+test('Jira Sync REQ18: a section changed in Jira and here is merged with --take both, the merged text going to the task and to Jira alike', async () => {
+  await ok(['jira', 'configure:map', 'acme', 'set', 'fields', 'description', 'section:acceptance-criteria', '--also']);
+  await ok(['backlog', 'set', 'T-ACME-3', '--add-line', 'acceptance-criteria=Aligned on tablets']);
+  type Block = { type: string; attrs?: Record<string, unknown>; content?: Block[]; text?: string };
+  const held = JSON.parse(JSON.stringify(issue('ACME-3').fields['description'])) as { content: Block[] };
+  const list = held.content.find((block) => block.type === 'taskList')!;
+  list.content!.push({ type: 'taskItem', attrs: { localId: 'x9', state: 'TODO' }, content: [{ type: 'text', text: 'Aligned on desktop' }] });
+  touch(fake.state, 'ACME-3', { description: held }, jiraNow());
+  const blocked = await eidos(['jira', 'sync', 'T-ACME-3', '--dry-run']);
+  assert.match(blocked.stdout, /! section:acceptance-criteria/);
+  const merged = await ok(['jira', 'sync', 'T-ACME-3', '--take', 'section:acceptance-criteria=both', '--yes']);
+  assert.match(merged, /synced ACME-3/);
+  assert.match(readFileSync(taskFile('T-ACME-3'), 'utf8'), /- \[x\] #1 Aligned on iOS\n- \[x\] #2 Aligned on Android 14\n- \[ \] #3 Aligned on desktop\n- \[ \] #4 Aligned on tablets/);
+  const words = (node: Block): string => (node.text ?? '') + (node.content ?? []).map(words).join('');
+  const after = (issue('ACME-3').fields['description'] as { content: Block[] }).content.find((block) => block.type === 'taskList')!;
+  assert.deepEqual(after.content!.map(words), ['Aligned on iOS', 'Aligned on Android 14', 'Aligned on desktop', 'Aligned on tablets']);
+  assert.match(await ok(['jira', 'sync', 'T-ACME-3', '--dry-run']), /level: nothing to sync/);
+  const refused = await eidos(['jira', 'sync', 'T-ACME-3', '--take', 'title=both', '--dry-run']);
+  assert.match(refused.stderr, /--take title=both merges a section/);
+});

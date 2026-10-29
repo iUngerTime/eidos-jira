@@ -43,9 +43,15 @@ function syncOptions(value: unknown): SyncOptions {
   const held = typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
   const strings = (record: unknown): Record<string, string> =>
     typeof record === 'object' && record !== null && !Array.isArray(record) ? Object.fromEntries(Object.entries(record).flatMap(([key, item]) => (text(item) ? [[key, text(item)]] : []))) : {};
-  const take = Object.fromEntries(Object.entries(strings(held['take'])).filter(([, side]) => side === 'jira' || side === 'eidos')) as Record<string, 'jira' | 'eidos'>;
+  const take = Object.fromEntries(Object.entries(strings(held['take'])).filter(([, side]) => side === 'jira' || side === 'eidos' || side === 'both')) as Record<string, 'jira' | 'eidos' | 'both'>;
+  // a section's merged text as the review built it, kept whole: a blank line in it is the person's
+  const resolved =
+    typeof held['resolved'] === 'object' && held['resolved'] !== null && !Array.isArray(held['resolved'])
+      ? Object.fromEntries(Object.entries(held['resolved'] as Record<string, unknown>).filter((entry): entry is [string, string] => entry[0].startsWith('section:') && typeof entry[1] === 'string'))
+      : {};
   return {
     take,
+    resolved,
     acceptLoss: Array.isArray(held['accept_loss']) ? held['accept_loss'].map(text).filter(Boolean) : [],
     ...(text(held['status_to']) ? { statusTo: text(held['status_to']) } : {}),
     ...(Array.isArray(held['via']) ? { via: held['via'].map(text).filter(Boolean) } : {}),

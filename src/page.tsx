@@ -6,7 +6,7 @@
 // board by pasting its address, and the options), and a page of its own per
 // board for its mapping, at /p/jira/mapping/<board>. Each answers through the
 // plugin's own routes.
-import { useCallback, useEffect, useRef, useState, type JSX, type MutableRefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type JSX, type MutableRefObject } from 'react';
 import {
   Badge,
   Button,
@@ -32,6 +32,7 @@ import {
   Stack,
   Switch,
   Text,
+  Textarea,
   useFileChanges,
   useOpen,
   usePluginEvent,
@@ -39,6 +40,7 @@ import {
   type PagePlugin,
   type PluginHost,
 } from 'eidosmd/page';
+import { mergeText, segmentsOf, type Pick } from './merge.ts';
 import { JIRA_STRINGS } from './page-strings.ts';
 
 interface SignInRow {
@@ -137,6 +139,7 @@ interface SyncPlanView {
     reason?: string;
     kept?: boolean;
     text?: { eidos: string; remote: string };
+    merged?: boolean;
   }>;
   status: { from: string; to: string; path: string[] } | null;
   comments: Array<{ index: number; text: string }>;
@@ -185,6 +188,8 @@ interface CreateChoices {
 // what a review settles, sent with every plan it asks for and with the sync
 interface SyncChoices {
   take: Record<string, 'jira' | 'eidos'>;
+  // a section changed on both sides settled to the text merged in the review (Jira Sync REQ18)
+  resolved?: Record<string, string>;
   accept_loss: string[];
   status_to?: string;
   via?: string[];
@@ -462,6 +467,13 @@ function SyncReview(props: { task: string; onClose: () => void; onSynced: () => 
   const hostRef = useHostRef(host);
   const { t } = host;
   const [choices, setChoices] = useState<SyncChoices>({ take: {}, accept_loss: [], fields: {} });
+  // the sections being merged, with the two texts as they stood when the merge was opened
+  const [merging, setMerging] = useState<Record<string, { jira: string; here: string }>>({});
+  const without = <T,>(record: Record<string, T> | undefined, key: string): Record<string, T> => Object.fromEntries(Object.entries(record ?? {}).filter(([held]) => held !== key));
+  const keep = (side: string, which: 'jira' | 'eidos'): void => {
+    setMerging(without(merging, side));
+    setChoices({ ...choices, take: { ...choices.take, [side]: which }, resolved: without(choices.resolved, side) });
+  };
   const [plan, setPlan] = useState<SyncPlanView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -519,7 +531,10 @@ function SyncReview(props: { task: string; onClose: () => void; onSynced: () => 
           .map((field) => {
             // a field settled by a choice stays choosable, so the other side can be picked instead
             const chosen = choices.take[field.side];
-            const shownSides = field.text && !field.kept && (field.verdict === 'conflict' || field.verdict === 'from-jira' || field.verdict === 'to-jira');
+            const resolved = choices.resolved?.[field.side];
+            const mergeable = field.side.startsWith('section:') && field.text !== undefined;
+            const open = merging[field.side];
+            const shownSides = field.text && !field.kept && !open && (field.verdict === 'conflict' || field.verdict === 'from-jira' || field.verdict === 'to-jira');
             return (
               <Stack key={field.side} gap="xs">
                 <Row>
@@ -527,29 +542,52 @@ function SyncReview(props: { task: string; onClose: () => void; onSynced: () => 
                   <Text weight="strong" grow>
                     {sideName(field.side)}
                   </Text>
-                  {(field.verdict === 'conflict' || chosen !== undefined) && (
+                  {(field.verdict === 'conflict' || chosen !== undefined || resolved !== undefined) && (
                     <Seg>
-                      <SegItem selected={chosen === 'jira'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'jira' } })}>
+                      <SegItem selected={chosen === 'jira'} onClick={() => keep(field.side, 'jira')}>
                         {t('keepJira')}
                       </SegItem>
-                      <SegItem selected={chosen === 'eidos'} onClick={() => setChoices({ ...choices, take: { ...choices.take, [field.side]: 'eidos' } })}>
+                      <SegItem selected={chosen === 'eidos'} onClick={() => keep(field.side, 'eidos')}>
                         {t('keepMine')}
                       </SegItem>
+                      {mergeable && (
+                        <SegItem
+                          selected={resolved !== undefined || open !== undefined}
+                          onClick={() => {
+                            if (open || resolved !== undefined) return;
+                            setMerging({ ...merging, [field.side]: { jira: field.text!.remote, here: field.text!.eidos } });
+                          }}
+                        >
+                          {t('mergeOpen')}
+                        </SegItem>
+                      )}
                     </Seg>
                   )}
                 </Row>
                 <Text size="sm" tone="muted" block>
+                  {field.merged && t('mergedNote')}
                   {field.verdict === 'conflict' && (field.reason === undefined || field.reason === 'changed in both places' ? t('bothChangedShort') : t('cannotTell'))}
                   {field.verdict === 'from-jira' && (shownSides ? t('fromJiraShort') : t('fromJira', { value: field.remote }))}
-                  {field.verdict === 'to-jira' && (field.kept ? t('keptHere', { reason: field.reason ?? '' }) : shownSides ? t('toJiraShort') : t('toJira', { value: field.eidos }))}
+                  {field.verdict === 'to-jira' && !field.merged && (field.kept ? t('keptHere', { reason: field.reason ?? '' }) : shownSides ? t('toJiraShort') : t('toJira', { value: field.eidos }))}
                   {field.verdict === 'same' && t('sameBoth')}
                 </Text>
-                {field.verdict === 'conflict' && !shownSides && (
+                {field.verdict === 'conflict' && !shownSides && !open && (
                   <Text size="sm" block>
                     {t('bothChanged', { here: field.eidos, jira: field.remote })}
                   </Text>
                 )}
                 {shownSides && <TextSides jira={field.text!.remote} here={field.text!.eidos} />}
+                {open && (
+                  <MergeEditor
+                    jira={open.jira}
+                    here={open.here}
+                    onCancel={() => setMerging(without(merging, field.side))}
+                    onUse={(text) => {
+                      setMerging(without(merging, field.side));
+                      setChoices({ ...choices, take: without(choices.take, field.side), resolved: { ...(choices.resolved ?? {}), [field.side]: text } });
+                    }}
+                  />
+                )}
               </Stack>
             );
           })}
@@ -700,6 +738,95 @@ function useTaskLink(again: unknown): TaskLink | null {
     };
   }, [host, file, again]);
   return link;
+}
+
+// A section changed on both sides merged as a git merge conflict is (Jira Sync REQ18): the lines both hold, muted, and
+// each place the two differ a conflict of its own, kept as Jira's, the task's, or both; the merged text shown as it
+// builds, and editable before it is used.
+function MergeEditor(props: { jira: string; here: string; onUse: (text: string) => void; onCancel: () => void }): JSX.Element {
+  const { t } = usePluginHost();
+  const segments = useMemo(() => segmentsOf(props.jira, props.here), [props.jira, props.here]);
+  const count = segments.filter((segment) => segment.kind === 'conflict').length;
+  const [picks, setPicks] = useState<Pick[]>(() => new Array<Pick>(count).fill('both'));
+  const [edited, setEdited] = useState<string | null>(null);
+  const merged = edited ?? mergeText(segments, (index) => picks[index] ?? 'both');
+  const pick = (index: number, chosen: Pick): void => {
+    setPicks(picks.map((held, at) => (at === index ? chosen : held)));
+    setEdited(null);
+  };
+  const lines = (held: string[], mark: string, kept: boolean): JSX.Element[] =>
+    held.map((line, index) => (
+      <Text key={index} size="sm" tone={kept ? 'muted' : 'default'} weight={kept ? 'normal' : 'strong'} block>
+        {`${mark} ${line === '' ? '\u00a0' : line}`}
+      </Text>
+    ));
+  let conflict = -1;
+  return (
+    <Stack gap="sm" data-testid="jira-merge">
+      <Text size="sm" tone="muted" block>
+        {t(count === 1 ? 'mergeHintOne' : 'mergeHint', { n: count })}
+      </Text>
+      {segments.map((segment, index) => {
+        if (segment.kind === 'shared') return <Stack key={index}>{lines(segment.lines, '\u00a0', true)}</Stack>;
+        conflict += 1;
+        const at = conflict;
+        return (
+          <Card key={index} variant="home">
+            <Stack gap="xs">
+              <Row>
+                <Text size="xs" tone="faint" grow>
+                  {t('conflictN', { n: at + 1 })}
+                </Text>
+                <Seg>
+                  <SegItem selected={picks[at] === 'jira'} onClick={() => pick(at, 'jira')}>
+                    {t('pickJira')}
+                  </SegItem>
+                  <SegItem selected={picks[at] === 'eidos'} onClick={() => pick(at, 'eidos')}>
+                    {t('pickMine')}
+                  </SegItem>
+                  <SegItem selected={picks[at] === 'both'} onClick={() => pick(at, 'both')}>
+                    {t('pickBoth')}
+                  </SegItem>
+                </Seg>
+              </Row>
+              <Text size="xs" tone="faint" block>
+                {t('sideJira')}
+              </Text>
+              {segment.jira.length > 0 ? (
+                lines(segment.jira, '−', false)
+              ) : (
+                <Text size="sm" tone="faint">
+                  {t('nothingHere')}
+                </Text>
+              )}
+              <Text size="xs" tone="faint" block>
+                {t('sideHere')}
+              </Text>
+              {segment.here.length > 0 ? (
+                lines(segment.here, '+', false)
+              ) : (
+                <Text size="sm" tone="faint">
+                  {t('nothingHere')}
+                </Text>
+              )}
+            </Stack>
+          </Card>
+        );
+      })}
+      <Text size="xs" tone="faint" block>
+        {t('mergedLabel')}
+      </Text>
+      <Textarea aria-label={t('mergedLabel')} rows={Math.min(14, merged.split('\n').length + 1)} value={merged} onChange={(event: { target: HTMLTextAreaElement }) => setEdited(event.target.value)} />
+      <Row justify="end">
+        <Button size="sm" variant="quiet" onClick={props.onCancel}>
+          {t('cancel')}
+        </Button>
+        <Button size="sm" variant="primary" disabled={merged.trim() === ''} onClick={() => props.onUse(merged)} data-testid="jira-merge-use">
+          {t('mergeUse')}
+        </Button>
+      </Row>
+    </Stack>
+  );
 }
 
 // ---- the ticket panel -------------------------------------------------------------------

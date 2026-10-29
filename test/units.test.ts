@@ -273,3 +273,29 @@ test("Jira REQ2: a board's address as Jira shows it reads as its site, project, 
   assert.equal(fromBoardUrl('acme.atlassian.net'), null);
   assert.equal(fromBoardUrl('https://acme.atlassian.net/wiki/spaces/X'), null);
 });
+
+test('Jira Sync REQ18: two texts split into the lines both hold and the conflicts between them, each settled by its pick', async () => {
+  const { mergeText, segmentsOf } = await import('../src/merge.ts');
+  const segments = segmentsOf('- [ ] #1 Shared\n- [ ] #2 From Jira!', '- [ ] #1 Shared\n- [ ] #2 From Eidos');
+  assert.deepEqual(segments, [
+    { kind: 'shared', lines: ['- [ ] #1 Shared'] },
+    { kind: 'conflict', jira: ['- [ ] #2 From Jira!'], here: ['- [ ] #2 From Eidos'] },
+  ]);
+  assert.equal(
+    mergeText(segments, () => 'both'),
+    '- [ ] #1 Shared\n- [ ] #2 From Jira!\n- [ ] #2 From Eidos',
+  );
+  assert.equal(
+    mergeText(segments, () => 'eidos'),
+    '- [ ] #1 Shared\n- [ ] #2 From Eidos',
+  );
+  assert.equal(
+    mergeText(segmentsOf('a\nb\nc', 'a\nc'), () => 'jira'),
+    'a\nb\nc',
+    'a line only one side holds is a conflict too, kept only when picked',
+  );
+  assert.equal(
+    mergeText(segmentsOf('a\nb\nc', 'a\nc'), () => 'eidos'),
+    'a\nc',
+  );
+});

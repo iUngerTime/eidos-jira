@@ -844,7 +844,11 @@ const entry: CliEntry = {
         .argument('[tasks...]', 'tasks by their id or their issue key')
         .option('--connection <name>', 'every task of a connection edited here since its last pull or sync, one issue at a time')
         .option('--dry-run', 'show what it would do and write nothing')
-        .option('--take <side=jira|eidos>', "settle a field changed on both sides: its side (title, status, section:description, or all) to Jira's value or the task's", collect)
+        .option(
+          '--take <side=jira|eidos|both>',
+          "settle a field changed on both sides: its side (title, status, section:description, or all) to Jira's value or the task's, or a section to both merged",
+          collect,
+        )
         .option('--accept-loss <side>', 'write a text field though Jira loses what markdown cannot hold (a panel, a file); `all` for every field', collect)
         .option('--status-to <status>', "the Jira status to go to when several read as the task's status")
         .option('--via <statuses>', 'Jira statuses to pass through, comma-separated, when the status asked for is more than one transition away')
@@ -871,7 +875,10 @@ const entry: CliEntry = {
               },
             ) => {
               const take = pairsOf(options.take, '--take');
-              for (const [side, chosen] of Object.entries(take)) if (chosen !== 'jira' && chosen !== 'eidos') throw new Error(`--take ${side} is jira or eidos`);
+              for (const [side, chosen] of Object.entries(take)) {
+                if (chosen !== 'jira' && chosen !== 'eidos' && chosen !== 'both') throw new Error(`--take ${side} is jira, eidos, or both`);
+                if (chosen === 'both' && side !== 'all' && !side.startsWith('section:')) throw new Error(`--take ${side}=both merges a section; a ${side} is one value, jira or eidos`);
+              }
               const base: SyncOptions = {
                 take: take as Record<string, 'jira' | 'eidos'>,
                 acceptLoss: options.acceptLoss ?? [],
@@ -904,9 +911,11 @@ const entry: CliEntry = {
                     if (!(await confirm(`Write ${side} anyway, losing what Jira holds that markdown cannot?`))) break;
                     chosen = { ...chosen, acceptLoss: [...(chosen.acceptLoss ?? []), side] };
                   } else {
-                    const answer = (await ask(`${side}: keep [j]ira's, keep [e]idos's, or [s]kip ${plan.key}? `, false)).toLowerCase();
+                    const section = side.startsWith('section:');
+                    const answer = (await ask(`${side}: keep [j]ira's, keep [e]idos's,${section ? ' keep [b]oth merged,' : ''} or [s]kip ${plan.key}? `, false)).toLowerCase();
                     if (answer.startsWith('j')) chosen = { ...chosen, take: { ...chosen.take, [side]: 'jira' } };
                     else if (answer.startsWith('e')) chosen = { ...chosen, take: { ...chosen.take, [side]: 'eidos' } };
+                    else if (section && answer.startsWith('b')) chosen = { ...chosen, take: { ...chosen.take, [side]: 'both' } };
                     else break;
                   }
                   plan = await api.syncPlan(ref, chosen);

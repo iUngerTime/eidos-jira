@@ -20,7 +20,8 @@ import { JiraError, siteBase, type Requester } from './client.ts';
 import { siteKey, type Connection, type Pair } from './connections.ts';
 import { cachedDescription, categoryOf, keepDescription, readDescription, type Description, type JiraType } from './describe.ts';
 import { knownOf, lostNodes, markdownToAdf, type AdfDoc } from './markdown.ts';
-import { bundlesOf, composeText, partPairs, realField, splitIssue, type Bundle } from './bundle.ts';
+import { bundlesOf, checklistFromJira, composeText, partPairs, realField, sectionOf, splitIssue, type Bundle } from './bundle.ts';
+import { mergeBoth } from './merge.ts';
 import { fieldsFor, fieldsOf, priorityFor, statusFor, syncOf, typeFor } from './mapping.ts';
 import {
   attachmentsFor,
@@ -62,6 +63,8 @@ export interface FieldPlan {
   kept?: boolean;
   // a section's two values whole, for the review to set side by side line by line
   text?: { eidos: string; remote: string };
+  // a section changed on both sides settled by merging them: the merged text goes to the task and to Jira alike
+  merged?: boolean;
 }
 
 export interface Blocker {
@@ -102,8 +105,10 @@ export interface SyncPlan {
 }
 
 export interface SyncOptions {
-  // a field settled by the person: the side (or `all`) to Jira's or to the task's value
-  take?: Record<string, 'jira' | 'eidos'>;
+  // a field settled by the person: the side (or `all`) to Jira's or to the task's value, or a section to both merged
+  take?: Record<string, 'jira' | 'eidos' | 'both'>;
+  // a section changed on both sides settled to the text the person merged in the review (Jira Sync REQ18)
+  resolved?: Record<string, string>;
   // the fields whose loss of what markdown cannot hold is agreed to
   acceptLoss?: string[];
   // the Jira statuses to pass through on the way to the one asked for, in order
@@ -633,7 +638,9 @@ export async function prepare(context: Context, task: TaskView, options: SyncOpt
   const fromJira: TaskFields = {};
   const pulledSides: string[] = [];
   const sameSides: string[] = [];
-  const take = (side: string): 'jira' | 'eidos' | undefined => options.take?.[side] ?? options.take?.['all'];
+  const take = (side: string): 'jira' | 'eidos' | 'both' | undefined => options.take?.[side] ?? options.take?.['all'];
+  // the sections settled by a merge, by side: written to the task as Jira's would be, and sent as the task's would be
+  const merged = new Map<string, string>();
   // a section of a bundled field to send waits for the others, since the field is written once from them all
   const bundledOut: Array<{ side: string; entry: FieldPlan; remoteNow: string }> = [];
   const send = (side: string, jira: string, out: Outgoing & { status?: StatusPlan }, remoteNow: string, entries: FieldPlan[]): void => {
@@ -698,11 +705,23 @@ export async function prepare(context: Context, task: TaskView, options: SyncOpt
     }
     if (verdict === 'conflict') {
       const chosen = take(side);
+      const resolved = options.resolved?.[side];
       if (chosen === 'jira') verdict = 'from-jira';
       else if (chosen === 'eidos') verdict = 'to-jira';
+      else if (side.startsWith('section:') && (chosen === 'both' || resolved !== undefined)) {
+        let text = resolved ?? mergeBoth(String(remoteValue ?? '').trim(), String(localValue ?? '').trim());
+        if (sectionOf(board, side)?.type === 'checklist') text = checklistFromJira(text);
+        merged.set(side, text);
+        fromJira.sections = { ...(fromJira.sections ?? {}), [side.slice('section:'.length)]: text };
+        entry.merged = true;
+        entry.eidos = shown(text);
+        entry.text = { eidos: text, remote: String(remoteValue ?? '').trim() };
+        verdict = 'to-jira';
+      }
     }
     // a value sent as Jira already holds it is the same text, settled without a write
-    if (verdict === 'to-jira' && side.startsWith('section:') && canonicalText(String(localValue ?? '')) === canonicalText(String(remoteValue ?? ''))) verdict = 'same';
+    const sendValue = merged.get(side) ?? localValue;
+    if (verdict === 'to-jira' && side.startsWith('section:') && canonicalText(String(sendValue ?? '')) === canonicalText(String(remoteValue ?? ''))) verdict = 'same';
     entry.verdict = verdict;
     const expected = options.expect?.[side];
     if (expected !== undefined && expected !== remoteNow && verdict !== 'unchanged' && verdict !== 'same') {
@@ -733,7 +752,7 @@ export async function prepare(context: Context, task: TaskView, options: SyncOpt
     if (verdict === 'same') sameSides.push(side);
     if (verdict === 'to-jira') {
       if (bundles.some((bundle) => bundle.sides.includes(side))) bundledOut.push({ side, entry, remoteNow });
-      else send(side, pair.jira, await outgoingFor(context, board, read, pair, editmeta, localValue, adf, options, side, ranks), remoteNow, [entry]);
+      else send(side, pair.jira, await outgoingFor(context, board, read, pair, editmeta, sendValue, adf, options, side, ranks), remoteNow, [entry]);
     }
     plan.fields.push(entry);
   }
@@ -743,7 +762,9 @@ export async function prepare(context: Context, task: TaskView, options: SyncOpt
   for (const bundle of bundles) {
     const sending = bundledOut.filter((held) => bundle.sides.includes(held.side));
     if (sending.length === 0) continue;
-    const values = Object.fromEntries(bundle.sides.map((side) => [side, String((sending.some((held) => held.side === side) ? heldValue(task, side) : intendedValue(intendedNow, side)) ?? '')]));
+    const values = Object.fromEntries(
+      bundle.sides.map((side) => [side, String((sending.some((held) => held.side === side) ? (merged.get(side) ?? heldValue(task, side)) : intendedValue(intendedNow, side)) ?? '')]),
+    );
     const first = issuePairs.find((pair) => pair.eidos === bundle.sides[0])!;
     const out = await outgoingFor(
       context,

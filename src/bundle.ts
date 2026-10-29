@@ -76,8 +76,10 @@ export function splitIssue(issue: Issue, bundles: Bundle[], board: BoardSettings
       parts.set(at, [...(parts.get(at) ?? []), node]);
     }
     const doc = (content: Node[]): Node | null => (content.length === 0 ? null : { type: 'doc', version: 1, content });
-    // a text that is not a document (an older field, plain text) is the first section's whole
-    fields[bundle.field] = typeof whole === 'object' && whole !== null && whole.type === 'doc' ? doc(parts.get(0) ?? []) : whole;
+    // a text with none of the other sections' headings, or one that is not a document (an older field, plain text), is the
+    // first section's whole, Jira's own value untouched, so what was recorded of it before the bundle still matches
+    const headed = [...parts.keys()].some((at) => at > 0);
+    fields[bundle.field] = headed && typeof whole === 'object' && whole !== null && whole.type === 'doc' ? doc(parts.get(0) ?? []) : whole;
     rest.forEach((side, index) => {
       const held = parts.get(index + 1);
       if (held === undefined) absent.add(side);

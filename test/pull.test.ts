@@ -356,3 +356,20 @@ test('Jira REQ5: logout takes the sign-in and its token out', async () => {
   assert.match(refused.stderr, /nobody is signed in/);
   writeFileSync(path.join(scratch, 'done'), '');
 });
+
+test('Jira REQ24: match shows the change first, and Replace makes the Backlog the board, after which nothing is left to change', async (t) => {
+  const first = await eidos(['jira', 'match', 'acme', '--dry-run']);
+  if (/needs a later Eidos MD/.test(first.stderr)) return t.skip('this Eidos MD cannot reshape the Backlog (Backlog REQ20)');
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /^Statuses: /m);
+  const before = snapshot();
+  const plan = JSON.parse(await ok(['jira', 'match', 'acme', '--replace', '--dry-run', '--json'])) as { statuses: { after: string[] }; moved: unknown[] };
+  assert.deepEqual(snapshot(), before, 'a dry run writes nothing');
+  await ok(['jira', 'match', 'acme', '--replace', '--yes']);
+  const again = JSON.parse(await ok(['jira', 'match', 'acme', '--replace', '--dry-run', '--json'])) as {
+    statuses: { after: string[]; added: string[]; removed: unknown[]; renamed: Record<string, string> };
+    moved: unknown[];
+  };
+  assert.deepEqual(again.statuses.after, plan.statuses.after);
+  assert.deepEqual([again.statuses.added, again.statuses.removed, again.statuses.renamed, again.moved], [[], [], {}, []], 'matched, nothing is left to change');
+});

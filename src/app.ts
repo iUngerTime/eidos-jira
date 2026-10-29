@@ -127,6 +127,16 @@ const entry: AppEntry<JiraApi> = {
         return { connection: made, state: state(host, api) };
       }),
     );
+    // matching the Backlog to a board (Jira REQ24): the change shown first, then written; the opening an agent is asked with
+    const modeOf = (value: unknown): 'add' | 'replace' => (value === 'replace' ? 'replace' : 'add');
+    host.route('POST', 'match-plan', (request) => answer(() => api.matchPlan(text(request.body['name']), modeOf(request.body['mode']))));
+    host.route('POST', 'match', (request) =>
+      answer(async () => {
+        const done = await api.match(text(request.body['name']), modeOf(request.body['mode']));
+        return { done, state: state(host, api) };
+      }),
+    );
+    host.route('GET', 'match-ask', (request) => answer(() => api.matchAsk(request.query.get('name') ?? '')));
     host.route('GET', 'boards', (request) => answer(() => api.boards(request.query.get('site') ?? undefined)));
     host.route('POST', 'resume', (request) =>
       answer(() => {

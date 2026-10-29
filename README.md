@@ -32,7 +32,7 @@ Works from the terminal with Eidos MD 0.16.1 or later. Its pages in the app (the
    eidos jira connect acme --site your-site.atlassian.net --key ACME --board 12
    ```
 
-4. **Map it.** **Edit mapping** opens the board's mapping page: each Jira status, issue type, priority, and link type with the Backlog value it maps to, and each issue type's fields with where they land. From the terminal, `eidos jira describe acme` then `eidos jira map acme`.
+4. **Map it.** **Edit mapping** opens the board's mapping page: each Jira status, issue type, priority, and link type with the Backlog value it maps to, and each issue type's fields with where they land. From the terminal, `eidos jira describe acme` then `eidos jira map acme`. Your Backlog doesn't have Jira's statuses, types, or priorities yet? See [Match the Backlog to Jira](#match-the-backlog-to-jira).
 5. **Fetch, then pull**, from the Jira Sync sidebar in the Activity Bar, or `eidos jira fetch` and `eidos jira pull`.
 
 `eidos instructions jira` prints the full guide, every command with its `--json` output, for you or an AI agent working in the root.
@@ -66,6 +66,22 @@ eidos jira create T-12 --connection acme --type Story
 ```
 
 It shows the plan first and makes nothing while something stops it. A create cut short is found again by a mark on the issue, never made twice.
+
+## Match the Backlog to Jira
+
+The mapping page's **Match the Backlog to Jira…** makes the Backlog's statuses, priorities, and task types follow the board, two ways:
+
+- **Add and rename** adds what Jira has and the Backlog lacks, and renames a Backlog value to the one Jira value it is read from. Nothing is removed.
+- **Replace** makes each list exactly Jira's, the board's columns included. A value Jira lacks is removed, and its tasks move to the Jira value it is read as.
+
+You see the whole change first: each list after it, and every task that changes, from what to what. A rename or a removal rewrites those tasks' files (their dates are kept), so the review warns you with how many, and Replace asks once more. Afterwards the mapping pairs each Jira value with its namesake. **Make changes with AI** asks the AI Agent instead, in a conversation of its own, with both sides' lists, and it changes nothing you have not accepted. From the terminal:
+
+```bash
+eidos jira match acme --dry-run
+eidos jira match acme --replace
+```
+
+Needs the Eidos MD release after 0.16.1.
 
 ## Several sections in one field
 

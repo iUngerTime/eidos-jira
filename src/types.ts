@@ -4,6 +4,23 @@
 // `host.plugin(name)`, are described here as far as it uses them.
 export type StatusCategory = 'todo' | 'in_progress' | 'done';
 
+// A change to the Backlog's lists (Backlog REQ20): each list as it is to be, and for a value leaving it a rename or where its tasks move.
+export interface Reshape {
+  statuses?: {
+    list: Array<{ name: string; category: StatusCategory }>;
+    columns?: Array<{ name: string; statuses: string[] }>;
+    default?: string;
+    renamed?: Record<string, string>;
+    moved?: Record<string, string>;
+  };
+  priorities?: { list: string[]; renamed?: Record<string, string>; moved?: Record<string, string | null> };
+  types?: { list: Array<{ name: string; title: string }>; renamed?: Record<string, string>; moved?: Record<string, string> };
+}
+export interface ReshapeResult {
+  settings: Record<string, unknown>;
+  moved: Array<{ task: string; field: 'status' | 'priority' | 'type'; from: string; to: string | null }>;
+}
+
 export interface SectionDeclaration {
   key: string;
   title: string;
@@ -67,6 +84,8 @@ export interface BacklogApi {
   unlink(name: string, type: string, other: string, direction?: 'outward' | 'inward'): TaskView;
   milestones(): Array<{ name: string; date: string | null }>;
   addMilestone(milestone: { name: string; date?: string | null }): Promise<unknown>;
+  // the statuses, priorities, and types reshaped in one change (Backlog REQ20, from the Eidos MD release after 0.16.1)
+  reshape?(change: Reshape, options?: { dryRun?: boolean }): Promise<ReshapeResult>;
   addProperty(declaration: { name: string; type: string; options?: string[]; applies_to?: string[]; meaning?: string }): Promise<BoardSettings>;
 }
 

@@ -35,6 +35,7 @@ import { readNeeds, setNeed, startAutoSync, type Need } from './autosync.ts';
 import { apply as applySync, editedHere, journalOf, prepare as prepareSync, sendComment, SyncRefused, taskFor, type SyncDone, type SyncOptions, type SyncPlan } from './sync.ts';
 import { tokensFile } from './tokens.ts';
 import { lift, onSite, pause, pauseOf, pauses, refusalOf, type Pause } from './pause.ts';
+import { matchChange, type MatchList, type MatchMode } from './reshape.ts';
 import type { AssetsApi, BacklogApi, CommentsApi, TaskView } from './types.ts';
 
 export interface JiraApi {
@@ -55,6 +56,10 @@ export interface JiraApi {
   boards(site?: string): Promise<BoardRow[]>;
   // the connections what runs on its own is held off, and the person lifting a pause (Jira REQ23)
   pauses(): Pause[];
+  // matching the Backlog to a board (Jira REQ24): the change shown first, then written, and the opening an agent is asked with
+  matchPlan(name: string, mode: MatchMode): Promise<MatchPlan>;
+  match(name: string, mode: MatchMode): Promise<MatchPlan>;
+  matchAsk(name: string): { title: string; text: string };
   // the folders the Assets plugin manages, null with it off (Jira Pull REQ14)
   assetFolders(): string[] | null;
   resume(name: string): boolean;
@@ -74,7 +79,7 @@ export interface JiraApi {
   ): Promise<{ connection: Connection; problems: MappingProblem[] }>;
   problems(name: string): MappingProblem[];
   // The mapping editor's half (Jira REQ12): what it draws, the whole mapping it saves, and a property made for a field
-  model(name: string, refresh: boolean): Promise<EditorModel>;
+  model(name: string, refresh: boolean): Promise<EditorModel & { title: string }>;
   saveMapping(name: string, chosen: MappingChoice): Promise<{ connection: Connection; problems: MappingProblem[] }>;
   addProperty(declaration: { name: string; type: string; options?: string[] }): Promise<void>;
   // Jira Sync: what a sync of one task would do, and doing it once nothing stands in its way
@@ -107,13 +112,22 @@ export interface TaskLink {
 
 export interface SyncStatus {
   connection: string;
-  // the board's name as Jira gives it, else the connection's (Jira REQ22)
+  // the board's name as Jira gives it, else its project's key (Jira REQ22)
   title: string;
   // set while what runs on its own is held off the connection (Jira REQ23)
   paused: Pause | null;
   edited: Array<{ task: string; key: string; sides: string[] }>;
   pending: string[];
   interrupted: Array<{ key: string; at: string }>;
+}
+
+// The Backlog matched to a board (Jira REQ24): each list before and after, and every task that moves.
+export interface MatchPlan {
+  mode: MatchMode;
+  statuses: MatchList;
+  priorities: MatchList;
+  types: MatchList;
+  moved: Array<{ task: string; field: 'status' | 'priority' | 'type'; from: string; to: string | null }>;
 }
 
 // A board the account signed in to a site can read (Jira REQ22), and the connection here over it, if any.
@@ -329,6 +343,16 @@ const entry: CliEntry = {
 
     const fetchOne = async (connection: Connection): Promise<Plan> => (await run(await contextFor(host, connection), false)).plan;
 
+    // what matching the Backlog to a board starts from: the board as describe last read it, the Backlog's settings, and the change worked out
+    const matching = (name: string, mode: MatchMode) => {
+      const connection = connectionNamed(host, name);
+      const read = cachedDescription(host.workspace, connection.name);
+      if (!read) throw new Error(`${connection.name}'s board has not been read yet; read it on the mapping page or with eidos jira describe ${connection.name}`);
+      const backlog = backlogOf(host);
+      if (!backlog.reshape) throw new Error('matching the Backlog to Jira needs a later Eidos MD, whose Backlog can be reshaped by a plugin');
+      return { backlog, connection, matched: matchChange(read, backlog.settings(), connection.mapping, mode) };
+    };
+
     const api: JiraApi = {
       connections: () => connections(host),
       fetch: async (name) => {
@@ -401,6 +425,48 @@ const entry: CliEntry = {
         return out.sort((a, b) => a.site.localeCompare(b.site) || a.name.localeCompare(b.name));
       },
       pauses: () => pauses(host),
+      matchPlan: async (name, mode) => {
+        const { backlog, connection, matched } = matching(name, mode);
+        const dry = await backlog.reshape!(matched.change, { dryRun: true });
+        return { mode, statuses: matched.statuses, priorities: matched.priorities, types: matched.types, moved: dry.moved };
+      },
+      match: async (name, mode) => {
+        const { backlog, connection, matched } = matching(name, mode);
+        const done = await backlog.reshape!(matched.change);
+        // each Jira value pairs with its namesake now
+        await writeConnections(
+          host,
+          connections(host).map((held) => (held.name === connection.name ? { ...held, mapping: { ...held.mapping, ...matched.mapping } } : held)),
+        );
+        host.emit('changed', {});
+        return { mode, statuses: matched.statuses, priorities: matched.priorities, types: matched.types, moved: done.moved };
+      },
+      matchAsk: (name) => {
+        const connection = connectionNamed(host, name);
+        const read = cachedDescription(host.workspace, connection.name);
+        if (!read) throw new Error(`${connection.name}'s board has not been read yet; eidos jira describe ${connection.name}`);
+        const board = backlogOf(host).settings();
+        const jiraStatuses = [...new Set(read.types.filter((type) => !type.subtask).flatMap((type) => type.statuses.map((status) => `${status.name} (${status.category})`)))];
+        const title = connection.title ?? connection.project;
+        return {
+          title: `Match the Backlog to ${title}`,
+          text: [
+            `Match this root's Backlog to the Jira board ${title} (connection ${connection.name}). Propose the change before making any.`,
+            '',
+            `Jira's statuses: ${jiraStatuses.join(', ')}.`,
+            `Jira's board columns: ${read.columns.map((column) => `${column.name} [${column.statuses.join(', ')}]`).join('; ')}.`,
+            `Jira's priorities: ${read.priorities.join(', ')}.`,
+            `Jira's issue types: ${read.types.map((type) => `${type.name}${type.subtask ? ' (sub-task)' : ''}`).join(', ')}.`,
+            '',
+            `The Backlog's statuses: ${board.statuses.map((status) => `${status} (${board.status_categories[status] ?? 'todo'})`).join(', ')}.`,
+            `The Backlog's columns: ${board.columns.map((column) => `${column.name} [${column.statuses.join(', ')}]`).join('; ')}.`,
+            `The Backlog's priorities: ${board.priorities.join(', ')}.`,
+            `The Backlog's task types: ${board.types.map((type) => `${type.title} (${type.name})`).join(', ')}.`,
+            '',
+            "Read `eidos instructions backlog` and `eidos jira map " + connection.name + " --help` first. Say which values you would add, rename, or remove, and where the tasks holding a removed value go, and how many tasks that touches (`eidos backlog --json`). Make each change with `eidos backlog configure:status`, `configure:priority`, `configure:column`, and `configure:type`, each run with `--dry-run` first, and change nothing I have not accepted. Then pair each Jira value with its Backlog value in the mapping with `eidos jira configure:map " + connection.name + "`.",
+          ].join('\n'),
+        };
+      },
       assetFolders: () => host.plugin<AssetsApi>('assets')?.folders().map((folder) => folder.name) ?? null,
       resume: (name) => lift(host, [connectionNamed(host, name).name]),
       connect: async (input) => {
@@ -517,7 +583,8 @@ const entry: CliEntry = {
       },
       model: async (name, refresh) => {
         const connection = connectionNamed(host, name);
-        return editorModel(connection, backlogOf(host).settings(), await description(connection, refresh));
+        // the board's name as Jira gives it, which the page titles itself by (Jira REQ22)
+        return { ...editorModel(connection, backlogOf(host).settings(), await description(connection, refresh)), title: connection.title ?? connection.project };
       },
       saveMapping: async (name, chosen) => {
         const connection = connectionNamed(host, name);
@@ -593,7 +660,7 @@ const entry: CliEntry = {
           });
           return {
             connection: connection.name,
-            title: connection.title ?? connection.name,
+            title: connection.title ?? connection.project,
             paused: pauseOf(host, connection.name),
             edited: editedHere({ backlog, connection }),
             pending,
@@ -802,6 +869,52 @@ const entry: CliEntry = {
             const found = connectionNamed(host, name);
             await api.disconnect(found.name);
             print(`Removed ${found.name}; the tasks it pulled stay where they are.`);
+          }),
+        );
+
+      // the plan a match makes, list by list, and every task it moves (Jira REQ24)
+      const describeMatch = (plan: MatchPlan): string[] => {
+        const lines: string[] = [];
+        const list = (label: string, held: MatchList): void => {
+          const parts = [
+            ...Object.entries(held.renamed).map(([from, to]) => `~ ${from} → ${to}`),
+            ...held.added.map((value) => `+ ${value}`),
+            ...held.removed.map((entry) => `- ${entry.value}${entry.to ? ` (its tasks to ${entry.to})` : ''}`),
+          ];
+          lines.push(`${label}: ${parts.length === 0 ? 'as Jira has them' : held.after.join(', ')}`);
+          for (const part of parts) lines.push(`  ${part}`);
+        };
+        list('Statuses', plan.statuses);
+        list('Priorities', plan.priorities);
+        list('Task types', plan.types);
+        lines.push(plan.moved.length === 0 ? 'No task changes.' : `${plan.moved.length} task${plan.moved.length === 1 ? '' : 's'} change, each file rewritten:`);
+        for (const entry of plan.moved) lines.push(`  ${entry.task}: ${entry.field} ${entry.from} → ${entry.to ?? 'none'}`);
+        return lines;
+      };
+      command
+        .command('match')
+        .argument('<connection>', "the connection's name")
+        .option('--replace', "make each list Jira's exactly, removing what Jira lacks; without it, only add and rename")
+        .option('--dry-run', 'show the change and write nothing')
+        .option('--yes', 'write it without asking')
+        .option('--json', 'print as JSON')
+        .description("match the Backlog's statuses, priorities, and task types to the board, from what describe last read")
+        .action(
+          action(async (name: string, options: { replace?: boolean; dryRun?: boolean; yes?: boolean; json?: boolean }) => {
+            const mode = options.replace ? 'replace' : 'add';
+            const plan = await api.matchPlan(name, mode);
+            if (!options.json) for (const line of describeMatch(plan)) print(line);
+            if (options.dryRun) return options.json ? json(plan) : undefined;
+            if (!options.yes) {
+              if (!process.stdin.isTTY) {
+                if (options.json) return json(plan);
+                return print('Nothing written: run in a terminal to confirm, or pass --yes.');
+              }
+              if (!(await confirm(plan.moved.length > 0 ? `Rewrite ${plan.moved.length} task${plan.moved.length === 1 ? '' : 's'} and change the Backlog's settings?` : "Change the Backlog's settings?"))) return;
+            }
+            const done = await api.match(name, mode);
+            if (options.json) return json(done);
+            print(`✓ The Backlog matches ${name}${done.moved.length > 0 ? `; ${done.moved.length} task${done.moved.length === 1 ? '' : 's'} moved` : ''}, and the mapping pairs each Jira value with its namesake.`);
           }),
         );
 

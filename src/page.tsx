@@ -118,6 +118,8 @@ interface Choice {
 // what the plugin's `model` route answers (its EditorModel)
 interface Model {
   connection: string;
+  // the board's name as Jira gives it (Jira REQ22)
+  title: string;
   read: string;
   types: Array<{ name: string; subtask: boolean; statuses: string[]; fields: EditorField[] }>;
   statuses: Array<{ name: string; category: 'todo' | 'in_progress' | 'done' }>;
@@ -1574,6 +1576,26 @@ function MappingPage(props: { name: string }): JSX.Element {
     if (stage.connection === props.name) setStages((held) => [...held, stage]);
   });
   const unsaved = chosen !== null && saved !== null && JSON.stringify(chosen) !== JSON.stringify(saved);
+  // matching the Backlog to the board (Jira REQ24), and the same asked of the AI Agent while it is on
+  const [matching, setMatching] = useState(false);
+  const [ask, setAsk] = useState<{ title: string; text: string } | null>(null);
+  const AskAgent = host.plugins.includes('agent') ? host.plugin?.<AgentPageApi>('agent')?.AskAgent : undefined;
+  const boardTitle = model?.title ?? props.name;
+  // matching writes the mapping too, so mapping edits not saved yet are asked about first
+  const startMatch = async (): Promise<void> => {
+    if (await leaveUnsaved()) setMatching(true);
+  };
+  useEffect(() => {
+    if (!model || !AskAgent) return;
+    let live = true;
+    hostRef.current.get<{ title: string; text: string }>(`match-ask?name=${encodeURIComponent(props.name)}`).then(
+      (next) => live && setAsk(next),
+      () => live && setAsk(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [hostRef, props.name, model, AskAgent]);
   const leaveUnsaved = async (): Promise<boolean> => !unsaved || host.dialog.confirm(t('unsavedAsk'), { title: t('unsavedTitle'), ok: t('discard'), danger: true });
   const back = async (): Promise<void> => {
     if (await leaveUnsaved()) host.navigate('/plugins/jira');
@@ -1613,7 +1635,7 @@ function MappingPage(props: { name: string }): JSX.Element {
           </Row>
           <Row justify="between" align="start" wrap>
             <Stack gap="none">
-              <PageTitle>{t('mappingTitle', { name: props.name })}</PageTitle>
+              <PageTitle>{t('mappingTitle', { name: model?.title ?? props.name })}</PageTitle>
               <PageText>
                 {model ? t('readFrom', { date: new Date(model.read).toLocaleString() }) : t('readingBoard')}
                 {unsaved ? ` · ${t('unsaved')}` : ''}
@@ -1642,17 +1664,193 @@ function MappingPage(props: { name: string }): JSX.Element {
       <Stack gap="md">
         {model && (
           <Notice>
-            <Row justify="between" wrap>
+            <Stack gap="sm">
               <Text size="sm">{t('backlogFirst')}</Text>
-              <Button size="sm" onClick={() => host.navigate('/plugins/backlog')}>
-                {t('openBacklog')}
-              </Button>
-            </Row>
+              <Row wrap>
+                <Button size="sm" variant="primary" onClick={() => void startMatch()} data-testid="jira-match">
+                  {t('matchOpen')}
+                </Button>
+                {AskAgent && ask && <AskAgent label={t('matchWithAi')} title={ask.title} text={ask.text} data-testid="jira-match-ai" />}
+                <Button size="sm" variant="quiet" onClick={() => host.navigate('/plugins/backlog')}>
+                  {t('openBacklog')}
+                </Button>
+              </Row>
+            </Stack>
           </Notice>
         )}
+        {matching && <MatchReview name={props.name} board={boardTitle} onClose={() => setMatching(false)} onMatched={() => {
+          setMatching(false);
+          read(false);
+        }} />}
         {body}
       </Stack>
     </Page>
+  );
+}
+
+// Matching the Backlog to the board (Jira REQ24): both ways, the whole change shown before anything is written.
+interface MatchList {
+  before: string[];
+  after: string[];
+  renamed: Record<string, string>;
+  added: string[];
+  removed: Array<{ value: string; to: string | null }>;
+}
+interface MatchPlan {
+  mode: 'add' | 'replace';
+  statuses: MatchList;
+  priorities: MatchList;
+  types: MatchList;
+  moved: Array<{ task: string; field: 'status' | 'priority' | 'type'; from: string; to: string | null }>;
+}
+// the AI Agent's page API as a plugin from outside draws it (AI Agent REQ15)
+interface AgentPageApi {
+  AskAgent: (props: { label: string; title: string; text: string; 'data-testid'?: string }) => JSX.Element;
+}
+
+function MatchList(props: { label: string; list: MatchList }): JSX.Element {
+  const { t } = usePluginHost();
+  const { list } = props;
+  const changes = Object.keys(list.renamed).length + list.added.length + list.removed.length;
+  return (
+    <Stack gap="xs">
+      <Row>
+        <Text weight="strong" grow>
+          {props.label}
+        </Text>
+        <Text size="xs" tone="faint">
+          {changes === 0 ? t('matchNoChange') : t('matchChanges', { n: changes })}
+        </Text>
+      </Row>
+      <Text size="sm" tone="muted" block>
+        {list.after.join(' · ')}
+      </Text>
+      {Object.entries(list.renamed).map(([from, to]) => (
+        <Text key={`r-${from}`} size="sm" block>
+          {t('matchRenamed', { from, to })}
+        </Text>
+      ))}
+      {list.added.map((value) => (
+        <Text key={`a-${value}`} size="sm" tone="accent" block>
+          {t('matchAdded', { value })}
+        </Text>
+      ))}
+      {list.removed.map((entry) => (
+        <Text key={`d-${entry.value}`} size="sm" tone="error" block>
+          {entry.to ? t('matchRemoved', { value: entry.value, to: entry.to }) : t('matchRemovedNone', { value: entry.value })}
+        </Text>
+      ))}
+    </Stack>
+  );
+}
+
+function MatchReview(props: { name: string; board: string; onClose: () => void; onMatched: () => void }): JSX.Element {
+  const host = usePluginHost();
+  const { t } = host;
+  const [mode, setMode] = useState<'add' | 'replace'>('add');
+  const [plan, setPlan] = useState<MatchPlan | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [writing, setWriting] = useState(false);
+  useEffect(() => {
+    let live = true;
+    setPlan(null);
+    setError(null);
+    host.post<MatchPlan>('match-plan', { name: props.name, mode }).then(
+      (next) => live && setPlan(next),
+      (cause) => live && setError(reason(cause)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [host, props.name, mode]);
+  const changes = plan ? [plan.statuses, plan.priorities, plan.types].reduce((n, list) => n + Object.keys(list.renamed).length + list.added.length + list.removed.length, 0) : 0;
+  const apply = async (): Promise<void> => {
+    if (!plan) return;
+    // a Replace that moves tasks asks once more, by how many
+    if (mode === 'replace' && plan.moved.length > 0) {
+      const sure = await host.dialog.confirm(t('matchSureAsk', { n: plan.moved.length }), { title: t('matchSureTitle'), ok: t('matchApply'), danger: true });
+      if (!sure) return;
+    }
+    setWriting(true);
+    try {
+      const answer = await host.post<{ done: MatchPlan }>('match', { name: props.name, mode });
+      host.toast(t('matchDone', { board: props.board }), 'success', answer.done.moved.length > 0 ? t('matchMoved', { n: answer.done.moved.length }) : undefined);
+      props.onMatched();
+    } catch (cause) {
+      setError(reason(cause));
+      setWriting(false);
+    }
+  };
+  let body: JSX.Element;
+  if (error) body = <Notice tone="error">{error}</Notice>;
+  else if (!plan) body = <SkeletonBar width={320} />;
+  else
+    body = (
+      <Stack gap="md">
+        {plan.moved.length > 0 && (
+          <Notice tone="error" data-testid="jira-match-warning">
+            <Stack gap="xs">
+              <Text size="sm" weight="strong" block>
+                {t('matchWarnTitle', { n: plan.moved.length })}
+              </Text>
+              <Text size="sm" block>
+                {t(mode === 'replace' ? 'matchWarnReplace' : 'matchWarnAdd')}
+              </Text>
+              {plan.moved.slice(0, 12).map((entry) => (
+                <Text key={`${entry.task}-${entry.field}`} size="xs" tone="muted" block>
+                  {t('matchMovedLine', { task: entry.task, field: t(`matchField_${entry.field}`), from: entry.from, to: entry.to ?? t('none') })}
+                </Text>
+              ))}
+              {plan.moved.length > 12 && (
+                <Text size="xs" tone="faint" block>
+                  {t('matchMore', { n: plan.moved.length - 12 })}
+                </Text>
+              )}
+            </Stack>
+          </Notice>
+        )}
+        <MatchList label={t('part_statuses')} list={plan.statuses} />
+        <MatchList label={t('part_priorities')} list={plan.priorities} />
+        <MatchList label={t('matchTypes')} list={plan.types} />
+      </Stack>
+    );
+  return (
+    <Modal
+      size="lg"
+      title={t('matchTitle', { board: props.board })}
+      onClose={props.onClose}
+      foot={
+        <Row>
+          <Button variant="quiet" onClick={props.onClose}>
+            {t('cancel')}
+          </Button>
+          <Button
+            variant={mode === 'replace' && (plan?.moved.length ?? 0) > 0 ? 'danger-fill' : 'primary'}
+            disabled={writing || !plan || changes === 0}
+            onClick={() => void apply()}
+            data-testid="jira-match-apply"
+          >
+            {t(writing ? 'matchApplying' : 'matchApply')}
+          </Button>
+        </Row>
+      }
+    >
+      <Stack gap="md" pad="md">
+        <Stack gap="xs">
+          <Seg>
+            {(['add', 'replace'] as const).map((each) => (
+              <SegItem key={each} selected={mode === each} aria-pressed={mode === each} onClick={() => setMode(each)} data-testid={`jira-match-${each}`}>
+                {t(`matchMode_${each}`)}
+              </SegItem>
+            ))}
+          </Seg>
+          <Text size="sm" tone="muted" block>
+            {t(`matchModeHint_${mode}`)}
+          </Text>
+        </Stack>
+        {body}
+      </Stack>
+    </Modal>
   );
 }
 

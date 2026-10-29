@@ -6,6 +6,7 @@ import { adfToMarkdown } from '../src/adf.ts';
 import { JiraError, siteBase } from '../src/client.ts';
 import { fromBoardUrl, opposed, readConnection, SignInError, type Connection } from '../src/connections.ts';
 import { refusalOf } from '../src/pause.ts';
+import { matchChange } from '../src/reshape.ts';
 import type { Description } from '../src/describe.ts';
 import { checkMapping, compactFields, draftMapping, editorModel, fieldsFor, priorityFor, statusFor, typeFor } from '../src/mapping.ts';
 import { jqlMoment, moment } from '../src/pull.ts';
@@ -394,4 +395,76 @@ test('Jira REQ23: a refused sign-in pauses the site, a refused or missing board 
 test('Jira REQ22: a connection keeps its title when it has one', () => {
   assert.equal(readConnection({ name: 'ctv', title: 'CTV', site: 'acme.atlassian.net', project: 'CTV' })?.title, 'CTV');
   assert.equal(readConnection({ name: 'ctv', site: 'acme.atlassian.net', project: 'CTV' })?.title, undefined);
+});
+
+const BOARD_READ: Description = {
+  connection: 'acme',
+  read: '2026-10-29T00:00:00Z',
+  columns: [
+    { name: 'Open', statuses: ['Open'] },
+    { name: 'Doing', statuses: ['In Progress'] },
+    { name: 'Done', statuses: ['Done'] },
+  ],
+  priorities: ['High', 'Medium', 'Low'],
+  link_types: [],
+  sprints: [],
+  filter: null,
+  sprint_field: null,
+  types: ['Task', 'Story', 'Bug', 'Sub-task'].map((name, index) => ({
+    id: String(index),
+    name,
+    subtask: name === 'Sub-task',
+    statuses: [
+      { id: '1', name: 'Open', category: 'todo' as const },
+      { id: '2', name: 'In Progress', category: 'in_progress' as const },
+      { id: '3', name: 'Done', category: 'done' as const },
+    ],
+    fields: [],
+  })),
+};
+
+test('Jira REQ24: Add and rename adds what Jira has and renames what the mapping reads from one Jira value alone, removing nothing', () => {
+  const matched = matchChange(BOARD_READ, BOARD, { statuses: [{ jira: 'Open', eidos: 'To Do' }] }, 'add');
+  assert.deepEqual(matched.statuses.renamed, { 'To Do': 'Open' });
+  assert.deepEqual(matched.statuses.after, ['Backlog', 'Open', 'In Progress', 'In Review', 'Done']);
+  assert.deepEqual(matched.statuses.removed, []);
+  assert.deepEqual(matched.priorities.renamed, { high: 'High', medium: 'Medium', low: 'Low' }, "Jira's spelling");
+  assert.deepEqual(matched.types.added, ['Story'], 'a sub-task type is not a task type');
+  assert.deepEqual(matched.types.after, ['Task', 'Bug', 'Story']);
+  assert.deepEqual(
+    matched.change.types?.list.map((type) => type.name),
+    ['default', 'bug', 'story'],
+  );
+  // a status added goes to the column Jira shows it in
+  assert.equal(matchChange(BOARD_READ, BOARD, {}, 'add').change.statuses?.columns?.find((column) => column.name === 'Doing'), undefined, 'In Progress was already on the board');
+});
+
+test("Jira REQ24: Replace makes each list Jira's, a value Jira lacks removed with its tasks moved to what it is read as, else the first of its category", () => {
+  const matched = matchChange(BOARD_READ, BOARD, { statuses: [{ jira: 'Open', eidos: 'To Do' }] }, 'replace');
+  assert.deepEqual(matched.statuses.after, ['Open', 'In Progress', 'Done']);
+  assert.deepEqual(matched.statuses.removed, [
+    { value: 'Backlog', to: 'Open' },
+    { value: 'In Review', to: 'In Progress' },
+  ]);
+  assert.deepEqual(matched.change.statuses?.columns, BOARD_READ.columns, "the board's columns");
+  assert.equal(matched.change.statuses?.default, 'Open');
+  assert.deepEqual(matched.priorities.after, ['High', 'Medium', 'Low']);
+  assert.deepEqual(matched.types.after, ['Task', 'Story', 'Bug']);
+  // the mapping pairs each Jira value with its namesake once written
+  assert.deepEqual(
+    matched.mapping.statuses?.map((pair) => [pair.jira, pair.eidos]),
+    [
+      ['Open', 'Open'],
+      ['In Progress', 'In Progress'],
+      ['Done', 'Done'],
+    ],
+  );
+  assert.deepEqual(
+    matched.mapping.types?.map((pair) => [pair.jira, pair.eidos]),
+    [
+      ['Task', 'default'],
+      ['Story', 'story'],
+      ['Bug', 'bug'],
+    ],
+  );
 });

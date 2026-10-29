@@ -1927,7 +1927,7 @@ export const page: PagePlugin = {
   name: 'jira',
   strings: JIRA_STRINGS,
   views: [
-    { sector: 'primary', name: 'boards', title: 'Jira', icon: JiraIcon, render: () => <JiraView /> },
+    { sector: 'primary', name: 'boards', title: 'Jira Sync', icon: JiraIcon, render: () => <JiraView /> },
     // the open ticket's own panel, beside a task the Backlog shows
     {
       sector: 'auxiliary',

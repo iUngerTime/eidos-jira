@@ -1,7 +1,7 @@
 // The settings page's words, in the languages the Eidos MD page draws in;
 // `manifestTitle` and `manifestDescription` name the plugin on the host's pages.
 const en = {
-  manifestTitle: 'Jira',
+  manifestTitle: 'Jira Sync',
   manifestDescription: "Pull a Jira Cloud board's issues into the Backlog as tasks, with their comments as threads",
   loading: 'Loading…',
   loadFailed: 'The Jira settings could not be read',

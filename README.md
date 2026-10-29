@@ -1,4 +1,4 @@
-# Jira for Eidos MD
+# Jira Sync for Eidos MD
 
 Bring your team's Jira board into your Eidos root, and send your work back. Every issue becomes a task in the Backlog, every comment thread comes with it, and your sprints become milestones, so you plan and work next to the blueprints while the board stays where your team keeps it.
 
@@ -13,12 +13,12 @@ Bring your team's Jira board into your Eidos root, and send your work back. Ever
 - **Sync on its own, when you trust it.** Off until you turn it on: after each save, after each push, or both. Anything to settle waits under **Needs you**.
 - **Private by design.** It runs on your machine and talks straight to your Jira site with your own API token. There is no server in between.
 
-Works from the terminal with Eidos MD 0.16.1 or later. Its pages in the app (the settings page, the Jira sidebar, the panel beside an open task, the mapping page, the sync review) need the next Eidos MD release, the first to load a community plugin's page.
+Works from the terminal with Eidos MD 0.16.1 or later. Its pages in the app (the settings page, the Jira Sync sidebar, the panel beside an open task, the mapping page, the sync review) need the next Eidos MD release, the first to load a community plugin's page.
 
 ## Get started
 
-1. **Install it.** In Eidos MD, open **Settings → Community plugins → Browse**, find **Jira**, and choose **Install**. Then switch it on under **Installed plugins**. It needs the Backlog and Comments plugins on.
-2. **Sign in.** Make a classic API token at [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens) (**Create API token**, not the one with scopes). Then sign in on the plugin's settings page (**Settings → Community plugins → Jira**), or in a terminal in your root:
+1. **Install it.** In Eidos MD, open **Settings → Community plugins → Browse**, find **Jira Sync**, and choose **Install**. Then switch it on under **Installed plugins**. It needs the Backlog and Comments plugins on.
+2. **Sign in.** Make a classic API token at [id.atlassian.com](https://id.atlassian.com/manage-profile/security/api-tokens) (**Create API token**, not the one with scopes). Then sign in on the plugin's settings page (**Settings → Community plugins → Jira Sync**), or in a terminal in your root:
 
    ```bash
    eidos jira login your-site.atlassian.net
@@ -33,13 +33,13 @@ Works from the terminal with Eidos MD 0.16.1 or later. Its pages in the app (the
    ```
 
 4. **Map it.** **Edit mapping** opens the board's mapping page: each Jira status, issue type, priority, and link type with the Backlog value it maps to, and each issue type's fields with where they land. From the terminal, `eidos jira describe acme` then `eidos jira map acme`.
-5. **Fetch, then pull**, from the Jira sidebar in the Activity Bar, or `eidos jira fetch` and `eidos jira pull`.
+5. **Fetch, then pull**, from the Jira Sync sidebar in the Activity Bar, or `eidos jira fetch` and `eidos jira pull`.
 
 `eidos instructions jira` prints the full guide, every command with its `--json` output, for you or an AI agent working in the root.
 
 ## Work a ticket
 
-Open a task the Backlog shows and its Jira panel sits beside it, in the auxiliary sidebar: whether it is in Jira, what a sync would carry each way, read again a moment after you edit, and **Sync with Jira…**, **Open in Jira**, or **Create in Jira…** for a task not in Jira yet. The Jira sidebar lists the tasks edited since their last pull or sync, and the ones waiting for you.
+Open a task the Backlog shows and its Jira panel sits beside it, in the auxiliary sidebar: whether it is in Jira, what a sync would carry each way, read again a moment after you edit, and **Sync with Jira…**, **Open in Jira**, or **Create in Jira…** for a task not in Jira yet. The Jira Sync sidebar lists the tasks edited since their last pull or sync, and the ones waiting for you.
 
 The sync review shows each field that moves: `←` from Jira, `→` to Jira, `!` changed on both sides. A text shows Jira's version and yours line by line, the lines only one side holds marked. A conflict offers **Keep Jira's**, **Keep mine**, or, for a section, **Merge…**.
 
@@ -84,7 +84,7 @@ Each person's, off by default, on the settings page under **Options**:
 - **Sync a task after it is saved**: a task edited here goes to Jira a few seconds after its last save.
 - **Sync after a push**: every task edited here goes to Jira once the app pushes.
 
-Both run only while the app has the root open, only for tasks edited here, never for one marked Don't sync. A sync that finds anything to settle writes nothing: the task goes under **Needs you** in the Jira sidebar with what stops it, a notification says so once, and **Review** settles it.
+Both run only while the app has the root open, only for tasks edited here, never for one marked Don't sync. A sync that finds anything to settle writes nothing: the task goes under **Needs you** in the Jira Sync sidebar with what stops it, a notification says so once, and **Review** settles it.
 
 ## What a pull writes
 
